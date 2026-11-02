@@ -1,0 +1,42 @@
+{
+  "approvedAt": "2026-10-26T00:00:00.000Z",
+  "approvedBy": "demo",
+  "brand": "ttc",
+  "contentId": "demo-ttc-04",
+  "demo": true,
+  "fingerprint": "b2f5899f",
+  "snapshot": {
+    "brand": "ttc",
+    "caption": "Save this space. Venezia Terrazzo brings a gentle speckle of rust and charcoal to a pared-back kitchen, honed for a soft, tactile finish.\n\nWhich would you choose: terrazzo floors or a terrazzo splashback?",
+    "channel": "Instagram",
+    "format": "Carousel",
+    "hashtags": [
+      "thetilecollective",
+      "savethisspace",
+      "terrazzo",
+      "kitcheninspo"
+    ],
+    "mediaIds": [],
+    "productIds": [
+      "p-terrazzo"
+    ],
+    "scheduledAt": "2026-11-02T18:00",
+    "shots": [],
+    "slides": [
+      {
+        "body": "A terrazzo kitchen.",
+        "heading": "Save this space"
+      },
+      {
+        "body": "Venezia Terrazzo, honed.",
+        "heading": "The floor"
+      },
+      {
+        "body": "Ivory, rust, charcoal.",
+        "heading": "The palette"
+      }
+    ],
+    "title": "Save This Space: a terrazzo kitchen"
+  },
+  "title": "Save This Space: a terrazzo kitchen"
+}

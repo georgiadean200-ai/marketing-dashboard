@@ -1,0 +1,53 @@
+{
+  "approvalId": null,
+  "approvedFingerprint": null,
+  "archived": false,
+  "brand": "ttc",
+  "brief": "",
+  "campaignId": "",
+  "caption": "Perfect Match: Onyx Hexagon on the floor, Linea Fluted on the wall.\n\nDeep charcoal grounds the room; chalk-white texture lifts it. Contrast, done softly.",
+  "channel": "Instagram",
+  "createdAt": "2026-10-18T23:00:00.000Z",
+  "createdBy": "demo",
+  "demo": true,
+  "direction": "",
+  "format": "Carousel",
+  "hashtags": [
+    "thetilecollective",
+    "perfectmatch",
+    "hexagontiles",
+    "bathroominspo"
+  ],
+  "mediaIds": [],
+  "productIds": [
+    "p-hex",
+    "p-fluted"
+  ],
+  "publishStatus": "",
+  "reviewNote": "",
+  "revision": 1,
+  "scheduledAt": "2026-11-09T18:00",
+  "series": "Perfect Match",
+  "shots": [],
+  "slides": [
+    {
+      "body": "Floor and wall, paired.",
+      "heading": "Perfect Match"
+    },
+    {
+      "body": "Onyx Hexagon, matt charcoal.",
+      "heading": "The floor"
+    },
+    {
+      "body": "Linea Fluted, chalk white.",
+      "heading": "The wall"
+    },
+    {
+      "body": "Contrast, done softly.",
+      "heading": "Together"
+    }
+  ],
+  "status": "Needs Review",
+  "title": "Perfect Match: hexagon floors, fluted walls",
+  "updatedAt": "2026-10-25T23:00:00.000Z"
+}

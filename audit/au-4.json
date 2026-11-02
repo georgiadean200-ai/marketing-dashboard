@@ -1,0 +1,11 @@
+{
+  "action": "Approved",
+  "actor": "demo",
+  "actorKind": "person",
+  "at": "2026-11-01T23:00:00.000Z",
+  "brand": "ttc",
+  "contentId": "demo-ttc-05",
+  "demo": true,
+  "detail": "Version 7b1a1934",
+  "title": "Tile of the Week: Nordic Oak Herringbone"
+}

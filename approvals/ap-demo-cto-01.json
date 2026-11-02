@@ -1,0 +1,42 @@
+{
+  "approvedAt": "2026-10-26T00:00:00.000Z",
+  "approvedBy": "demo",
+  "brand": "cto",
+  "contentId": "demo-cto-01",
+  "demo": true,
+  "fingerprint": "22a26308",
+  "snapshot": {
+    "brand": "cto",
+    "caption": "Love the marble look? So do we. Here are our favourite marble-look and polished picks for bathrooms and living areas. Shop online, delivered to your door.",
+    "channel": "Instagram",
+    "format": "Carousel",
+    "hashtags": [
+      "cheaptilesonline",
+      "marblelook",
+      "bathroomreno"
+    ],
+    "mediaIds": [],
+    "productIds": [
+      "c-carrara",
+      "c-grey"
+    ],
+    "scheduledAt": "2026-11-02T18:00",
+    "shots": [],
+    "slides": [
+      {
+        "body": "For less.",
+        "heading": "The marble look"
+      },
+      {
+        "body": "Gloss 300 × 600 mm wall tile.",
+        "heading": "Carrara Look"
+      },
+      {
+        "body": "600 × 600 mm floor tile.",
+        "heading": "Polished Grey"
+      }
+    ],
+    "title": "Big look, small spend: marble-look picks"
+  },
+  "title": "Big look, small spend: marble-look picks"
+}

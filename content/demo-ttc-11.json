@@ -1,0 +1,31 @@
+{
+  "approvalId": null,
+  "approvedFingerprint": null,
+  "archived": false,
+  "brand": "ttc",
+  "brief": "",
+  "campaignId": "",
+  "caption": "",
+  "channel": "Pinterest",
+  "createdAt": "2026-10-18T23:00:00.000Z",
+  "createdBy": "demo",
+  "demo": true,
+  "direction": "",
+  "format": "Pin",
+  "hashtags": [],
+  "mediaIds": [],
+  "productIds": [
+    "p-paver",
+    "p-concrete"
+  ],
+  "publishStatus": "",
+  "reviewNote": "",
+  "revision": 1,
+  "scheduledAt": "2026-11-14T10:00",
+  "series": "Seasonal Inspiration",
+  "shots": [],
+  "slides": [],
+  "status": "Idea",
+  "title": "Summer alfresco tile edit",
+  "updatedAt": "2026-10-25T23:00:00.000Z"
+}

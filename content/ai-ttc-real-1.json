@@ -1,0 +1,58 @@
+{
+  "approvalId": null,
+  "approvedFingerprint": null,
+  "archived": false,
+  "brand": "ttc",
+  "brief": "Concept: the calm of a natural-stone home, made easy. Slide 1 uses the official Shopify lifestyle photo of Travertine Stone Ivory In Out; slides 2 to 4 use close-up showroom photography of the actual tile in soft daylight. Keep the ivory tone true: no warm filters or added saturation. Note for review: this product has no slip rating in Shopify, so the copy deliberately makes no outdoor or slip claims; confirm with Wade before adding any.",
+  "campaignId": "",
+  "caption": "Ivory stone, soft light, slow weekends.\n\nTravertine Stone Ivory In Out brings the authentic veining and tonal variation of natural travertine to porcelain, without the upkeep. A 600 × 600 mm tile that feels at home in Coastal, Hamptons and Japandi interiors.\n\nSave this for your renovation shortlist, and come and see it in person at our Herston showroom.",
+  "channel": "Instagram",
+  "createdAt": "2026-11-02T08:38:12.018Z",
+  "createdBy": "ai",
+  "direction": "",
+  "format": "Carousel",
+  "hashtags": [
+    "thetilecollective",
+    "travertine",
+    "travertinetiles",
+    "coastalinteriors",
+    "hamptonsstyle",
+    "japandi",
+    "brisbanerenovation"
+  ],
+  "mediaIds": [],
+  "productIds": [
+    "shop-ttc-9844123926848"
+  ],
+  "publishStatus": "",
+  "reviewNote": "",
+  "revision": 1,
+  "scheduledAt": "2026-11-23T18:00",
+  "series": "Inspiration",
+  "shots": [],
+  "slides": [
+    {
+      "body": "Travertine Stone Ivory In Out",
+      "heading": "Ivory stone, slow weekends"
+    },
+    {
+      "body": "Authentic veining and tonal variation",
+      "heading": "The look of travertine"
+    },
+    {
+      "body": "Porcelain, in a 600 × 600 mm format",
+      "heading": "Without the upkeep"
+    },
+    {
+      "body": "One tile, three ways to style it",
+      "heading": "Coastal. Hamptons. Japandi."
+    },
+    {
+      "body": "Visit our showroom",
+      "heading": "See it in Herston"
+    }
+  ],
+  "status": "Needs Review",
+  "title": "Inspiration: Travertine Stone Ivory In Out",
+  "updatedAt": "2026-11-02T08:38:12.020Z"
+}

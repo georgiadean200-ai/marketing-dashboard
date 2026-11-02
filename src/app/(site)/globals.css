@@ -1,0 +1,4 @@
+@import "tailwindcss";
+:root { --bg:#FAFAF6; --ink:#000; --text:#333; --muted:#666; --line:#E7E3D9; --lime:#D2DE26; }
+@media (prefers-color-scheme: dark) { :root { --bg:#161615; --ink:#F6F6F0; --text:#DEDED6; --muted:#A6A69D; --line:#30302C; } }
+body { background: var(--bg); color: var(--text); font-family: "Gotham", "Montserrat", system-ui, sans-serif; }

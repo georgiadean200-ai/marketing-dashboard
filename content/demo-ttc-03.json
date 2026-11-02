@@ -1,0 +1,52 @@
+{
+  "approvalId": "ap-demo-ttc-03",
+  "approvedFingerprint": "01345429",
+  "archived": false,
+  "brand": "ttc",
+  "brief": "",
+  "campaignId": "",
+  "caption": "Watch the light move across Medina Zellige in sage. Every tile catches it a little differently, which is the whole point.",
+  "channel": "Instagram",
+  "createdAt": "2026-10-18T23:00:00.000Z",
+  "createdBy": "demo",
+  "demo": true,
+  "direction": "",
+  "format": "Reel",
+  "hashtags": [
+    "thetilecollective",
+    "zellige",
+    "kitchendesign",
+    "splashback"
+  ],
+  "mediaIds": [],
+  "productIds": [
+    "p-zellige"
+  ],
+  "publishStatus": "Posted — confirmed manually",
+  "publishedAt": "2026-10-30T17:30",
+  "reviewNote": "",
+  "revision": 1,
+  "scheduledAt": "2026-10-30T17:30",
+  "series": "Product Feature",
+  "shots": [
+    {
+      "onScreenText": "Medina Zellige",
+      "seconds": 4,
+      "shot": "Slow pan across a sage zellige splashback in morning light"
+    },
+    {
+      "onScreenText": "Handmade look",
+      "seconds": 3,
+      "shot": "Macro of the glaze edge"
+    },
+    {
+      "onScreenText": "In sage",
+      "seconds": 4,
+      "shot": "Wide kitchen reveal"
+    }
+  ],
+  "slides": [],
+  "status": "Published",
+  "title": "Sage zellige in motion",
+  "updatedAt": "2026-10-25T23:00:00.000Z"
+}

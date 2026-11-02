@@ -1,0 +1,36 @@
+{
+  "approvalId": "ap-demo-ttc-02",
+  "approvedFingerprint": "d1727e49",
+  "archived": false,
+  "brand": "ttc",
+  "brief": "",
+  "campaignId": "",
+  "caption": "Tile of the Week: Calacatta Grande.\n\nA polished 600 × 1200 mm porcelain with the softest grey vein. Fewer grout lines, more calm. Beautiful from floor to feature wall.",
+  "channel": "Instagram",
+  "createdAt": "2026-10-18T23:00:00.000Z",
+  "createdBy": "demo",
+  "demo": true,
+  "direction": "",
+  "format": "Single image",
+  "hashtags": [
+    "thetilecollective",
+    "tileoftheweek",
+    "marblelook",
+    "largeformattiles"
+  ],
+  "mediaIds": [],
+  "productIds": [
+    "p-calacatta"
+  ],
+  "publishStatus": "Posted — confirmed manually",
+  "publishedAt": "2026-10-28T18:00",
+  "reviewNote": "",
+  "revision": 1,
+  "scheduledAt": "2026-10-28T18:00",
+  "series": "Tile of the Week",
+  "shots": [],
+  "slides": [],
+  "status": "Published",
+  "title": "Tile of the Week: Calacatta Grande",
+  "updatedAt": "2026-10-25T23:00:00.000Z"
+}

@@ -1,0 +1,48 @@
+{
+  "approvedAt": "2026-10-26T00:00:00.000Z",
+  "approvedBy": "demo",
+  "brand": "ttc",
+  "contentId": "demo-ttc-01",
+  "demo": true,
+  "fingerprint": "231daaa5",
+  "snapshot": {
+    "brand": "ttc",
+    "caption": "Warm travertine underfoot, fluted texture on the vanity wall. A bathroom that asks you to slow down.\n\nRoma Travertine in a honed finish, paired with Linea Fluted in chalk white.\n\nSave this for your next renovation, and visit us in Herston to see both in person.",
+    "channel": "Instagram",
+    "format": "Carousel",
+    "hashtags": [
+      "thetilecollective",
+      "bathroomdesign",
+      "travertine",
+      "flutedtiles",
+      "brisbaneinteriors"
+    ],
+    "mediaIds": [],
+    "productIds": [
+      "p-travertine",
+      "p-fluted"
+    ],
+    "scheduledAt": "2026-10-26T18:00",
+    "shots": [],
+    "slides": [
+      {
+        "body": "A calm bathroom in two tiles.",
+        "heading": "Soft stone, slow mornings"
+      },
+      {
+        "body": "Honed 600 × 600 mm, warm sand.",
+        "heading": "Roma Travertine"
+      },
+      {
+        "body": "Chalk white texture for the vanity wall.",
+        "heading": "Linea Fluted"
+      },
+      {
+        "body": "Both on display in our showroom.",
+        "heading": "See it in Herston"
+      }
+    ],
+    "title": "Soft stone, slow mornings"
+  },
+  "title": "Soft stone, slow mornings"
+}

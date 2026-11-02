@@ -1,0 +1,35 @@
+{
+  "approvalId": "ap-demo-ttc-05",
+  "approvedFingerprint": "7b1a1934",
+  "archived": false,
+  "brand": "ttc",
+  "brief": "",
+  "campaignId": "",
+  "caption": "Tile of the Week: Nordic Oak Herringbone.\n\nThe warmth of timber, laid in a classic herringbone, with the durability of porcelain. Yes, even in the bathroom.",
+  "channel": "Instagram",
+  "createdAt": "2026-10-18T23:00:00.000Z",
+  "createdBy": "demo",
+  "demo": true,
+  "direction": "",
+  "format": "Single image",
+  "hashtags": [
+    "thetilecollective",
+    "tileoftheweek",
+    "herringbone",
+    "timberlook"
+  ],
+  "mediaIds": [],
+  "productIds": [
+    "p-oak"
+  ],
+  "publishStatus": "",
+  "reviewNote": "",
+  "revision": 1,
+  "scheduledAt": "2026-11-04T18:00",
+  "series": "Tile of the Week",
+  "shots": [],
+  "slides": [],
+  "status": "Approved",
+  "title": "Tile of the Week: Nordic Oak Herringbone",
+  "updatedAt": "2026-10-25T23:00:00.000Z"
+}

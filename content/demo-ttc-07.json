@@ -1,0 +1,39 @@
+{
+  "approvalId": null,
+  "approvedFingerprint": null,
+  "archived": false,
+  "brand": "ttc",
+  "brief": "",
+  "campaignId": "",
+  "caption": "New sample boards just landed in Herston. Come and have a feel.",
+  "channel": "Instagram",
+  "createdAt": "2026-10-18T23:00:00.000Z",
+  "createdBy": "demo",
+  "demo": true,
+  "direction": "",
+  "format": "Story",
+  "hashtags": [],
+  "mediaIds": [],
+  "productIds": [],
+  "publishStatus": "",
+  "reviewNote": "",
+  "revision": 1,
+  "scheduledAt": "2026-11-05T12:00",
+  "series": "Behind the Scenes",
+  "shots": [
+    {
+      "onScreenText": "Fresh samples",
+      "seconds": 4,
+      "shot": "Boxes being unpacked"
+    },
+    {
+      "onScreenText": "Now in Herston",
+      "seconds": 4,
+      "shot": "Hands placing a board on the display"
+    }
+  ],
+  "slides": [],
+  "status": "AI Draft",
+  "title": "Behind the Scenes: new samples landing in Herston",
+  "updatedAt": "2026-10-25T23:00:00.000Z"
+}

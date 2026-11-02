@@ -1,0 +1,34 @@
+{
+  "approvalId": null,
+  "approvedFingerprint": null,
+  "archived": false,
+  "brand": "cto",
+  "brief": "",
+  "campaignId": "",
+  "caption": "Tile of the Week: Classic Subway. The splashback that never dates. Bevelled, glossy and easy to style. Order online today.",
+  "channel": "Instagram",
+  "createdAt": "2026-10-18T23:00:00.000Z",
+  "createdBy": "demo",
+  "demo": true,
+  "direction": "",
+  "format": "Single image",
+  "hashtags": [
+    "cheaptilesonline",
+    "subwaytiles",
+    "splashback"
+  ],
+  "mediaIds": [],
+  "productIds": [
+    "c-subway"
+  ],
+  "publishStatus": "",
+  "reviewNote": "",
+  "revision": 1,
+  "scheduledAt": "2026-11-04T18:00",
+  "series": "Tile of the Week",
+  "shots": [],
+  "slides": [],
+  "status": "Needs Review",
+  "title": "Tile of the Week: Classic Subway",
+  "updatedAt": "2026-10-25T23:00:00.000Z"
+}
