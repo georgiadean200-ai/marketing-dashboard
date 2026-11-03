@@ -23,4 +23,4 @@ export async function proxy(request: NextRequest) {
   return response;
 }
 
-export const config = { matcher: ["/studio/:path*", "/api/ai/:path*", "/api/jobs/:id", "/api/shopify/:brand/sync", "/api/health", "/login"] };
+export const config = { matcher: ["/studio/:path*", "/api/ai/:path*", "/api/jobs/:id", "/api/shopify/:brand/sync", "/api/ugc/:path*", "/api/health", "/login"] };

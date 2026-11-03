@@ -1,0 +1,37 @@
+Files added (A) or modified (M) by the UGC Discovery update. Copy them into your project at the same paths.
+
+M	.env.example
+M	CLAUDE.md
+M	README.md
+A	docs/UGC.md
+A	docs/UPGRADE-UGC.md
+M	legacy-ui/08-standalone.js
+A	legacy-ui/09-ugc.js
+M	package.json
+M	scripts/build-studio-ui.mjs
+A	src/app/api/cron/ugc/route.ts
+A	src/app/api/instagram/webhooks/route.ts
+A	src/app/api/ugc/[brand]/discover/route.ts
+A	src/app/api/ugc/[brand]/import/route.ts
+A	src/app/api/ugc/[brand]/recommend/route.ts
+A	src/app/api/ugc/item/[id]/draft/route.ts
+A	src/app/api/ugc/item/[id]/save/route.ts
+M	src/lib/content/constants.ts
+M	src/lib/env.ts
+A	src/lib/instagram/client.ts
+M	src/lib/jobs/worker.ts
+A	src/lib/ugc/discover.ts
+A	src/lib/ugc/draft.ts
+A	src/lib/ugc/normalize.ts
+A	src/lib/ugc/recommender.ts
+A	src/lib/ugc/score.ts
+A	src/lib/ugc/store.ts
+M	src/proxy.ts
+A	supabase/migrations/20261110000600_ugc.sql
+M	supabase/run-db-tests.sh
+M	supabase/tests_security.sql
+A	supabase/tests_ugc.sql
+M	tests/integration.test.ts
+M	tests/support/pg-supabase.ts
+A	tests/ugc.test.ts
+M	vercel.json

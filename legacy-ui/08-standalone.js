@@ -25,7 +25,7 @@ const toItem = (r) => ({ id: r.id, brand: r.brand_id, campaignId: r.campaign_id 
   scheduledAt: isoLocal(r.scheduled_at), caption: r.caption, hashtags: r.hashtags || [], productIds: r.product_ids || [], mediaIds: r.asset_ids || [],
   slides: r.slides || [], shots: r.shots || [], brief: r.brief, direction: r.direction, status: r.status, reviewNote: r.review_note,
   approvalId: r.approval_id, approvedFingerprint: r.client_fingerprint, publishStatus: r.publish_status, publishedAt: isoLocal(r.published_at),
-  archived: r.archived, demo: r.demo, revision: r.revision, createdBy: r.created_by_agent ? "ai" : (r.created_by || ""), createdAt: r.created_at, updatedAt: r.updated_at });
+  archived: r.archived, demo: r.demo, revision: r.revision, ugcId: r.ugc_id || null, createdBy: r.created_by_agent ? "ai" : (r.created_by || ""), createdAt: r.created_at, updatedAt: r.updated_at });
 const fromItem = (it) => ({ brand_id: it.brand, campaign_id: it.campaignId || null, title: it.title || "", series: it.series || "", channel: it.channel, format: it.format,
   scheduled_at: localIso(it.scheduledAt), caption: it.caption || "", hashtags: it.hashtags || [], product_ids: it.productIds || [], asset_ids: it.mediaIds || [],
   slides: it.slides || [], shots: it.shots || [], brief: it.brief || "", direction: it.direction || "", review_note: it.reviewNote || "", archived: !!it.archived,
@@ -92,7 +92,7 @@ async function init() {
   catch (e) { console.error(e); S.mode = "slow"; }
   render();
   const ch = SB.channel("studio-live");
-  ["content_items", "approvals", "audit_log", "campaigns", "assets", "settings", "shopify_connections", "brands"].forEach((t) =>
+  ["content_items", "approvals", "audit_log", "campaigns", "assets", "settings", "shopify_connections", "brands", "ugc_items", "instagram_connections"].forEach((t) =>
     ch.on("postgres_changes", { event: "*", schema: "public", table: t }, () => refresh(t)));
   ch.subscribe();
   setInterval(() => refresh("assets"), 45 * 60e3); // signed image links last an hour

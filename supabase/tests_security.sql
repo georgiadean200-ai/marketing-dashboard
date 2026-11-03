@@ -112,7 +112,11 @@ set timezone='Australia/Brisbane';
 select public._ok('Fingerprint is identical in every time zone', (select f from _fp)=(select public.content_fingerprint(c) from public.content_items c where id='c1'));
 select public._ok('Audit hash chain verifies', (select ok from public.verify_audit_chain()));
 -- Simulate a database superuser bypassing the triggers to tamper: the chain must expose it.
-alter table public.audit_log disable trigger audit_no_update; update public.audit_log set detail='tampered' where id=(select min(id) from public.audit_log); alter table public.audit_log enable trigger audit_no_update;
+create temp table _orig as select id, detail from public.audit_log where id=(select min(id) from public.audit_log);
+alter table public.audit_log disable trigger audit_no_update; update public.audit_log set detail='tampered' where id=(select id from _orig); alter table public.audit_log enable trigger audit_no_update;
 select public._ok('Tampering by a superuser is detected by the hash chain', not (select ok from public.verify_audit_chain()));
+-- put the record back so later suites start from an intact chain
+alter table public.audit_log disable trigger audit_no_update; update public.audit_log a set detail=o.detail from _orig o where a.id=o.id; alter table public.audit_log enable trigger audit_no_update;
+select public._ok('Restoring the original record makes the chain verify again', (select ok from public.verify_audit_chain()));
 select format('%s  %s%s', case when pass then 'PASS' else 'FAIL' end, label, case when pass then '' else '  →  '||coalesce(detail,'') end) from public._results order by n;
 select format('%s/%s passed', count(*) filter (where pass), count(*)) from public._results;

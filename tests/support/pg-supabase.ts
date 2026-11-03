@@ -52,7 +52,7 @@ class Query implements PromiseLike<{ data: unknown; error: unknown; count?: numb
   private op: "select" | "insert" | "upsert" | "update" | "delete" = "select";
   private cols = "*"; private filters: [string, string, unknown][] = []; private orders: string[] = [];
   private lim?: number; private off?: number; private one: "" | "single" | "maybe" = ""; private returning = false;
-  private rows: Record<string, unknown>[] = []; private patch: Record<string, unknown> = {}; private conflict = "";
+  private rows: Record<string, unknown>[] = []; private patch: Record<string, unknown> = {}; private conflict = ""; private ignoreDup = false;
   private countOnly = false;
   constructor(private who: Who, private table: string) {}
   select(cols = "*", opts?: { count?: string; head?: boolean }) {
@@ -60,7 +60,7 @@ class Query implements PromiseLike<{ data: unknown; error: unknown; count?: numb
     return this;
   }
   insert(r: Record<string, unknown> | Record<string, unknown>[]) { this.op = "insert"; this.rows = Array.isArray(r) ? r : [r]; return this; }
-  upsert(r: Record<string, unknown> | Record<string, unknown>[], o?: { onConflict?: string }) { this.op = "upsert"; this.rows = Array.isArray(r) ? r : [r]; this.conflict = o?.onConflict ?? ""; return this; }
+  upsert(r: Record<string, unknown> | Record<string, unknown>[], o?: { onConflict?: string; ignoreDuplicates?: boolean }) { this.op = "upsert"; this.rows = Array.isArray(r) ? r : [r]; this.conflict = o?.onConflict ?? ""; this.ignoreDup = !!o?.ignoreDuplicates; return this; }
   update(p: Record<string, unknown>) { this.op = "update"; this.patch = p; return this; }
   delete() { this.op = "delete"; return this; }
   eq(c: string, v: unknown) { this.filters.push([c, "=", v]); return this; }
@@ -68,6 +68,7 @@ class Query implements PromiseLike<{ data: unknown; error: unknown; count?: numb
   gte(c: string, v: unknown) { this.filters.push([c, ">=", v]); return this; }
   lte(c: string, v: unknown) { this.filters.push([c, "<=", v]); return this; }
   in(c: string, v: unknown[]) { this.filters.push([c, "in", v]); return this; }
+  is(c: string, v: null | boolean) { this.filters.push([c, "is", v]); return this; }
   order(c: string, o?: { ascending?: boolean }) { this.orders.push(`${ident(c)} ${o?.ascending === false ? "desc" : "asc"}`); return this; }
   limit(n: number) { this.lim = n; return this; }
   range(a: number, b: number) { this.off = a; this.lim = b - a + 1; return this; }
@@ -86,6 +87,7 @@ class Query implements PromiseLike<{ data: unknown; error: unknown; count?: numb
     if (!this.filters.length) return "";
     return " where " + this.filters.map(([c, op, v]) => {
       if (op === "in") { params.push(v); return `${ident(c)} = any($${params.length})`; }
+      if (op === "is") return `${ident(c)} is ${v === null ? "null" : v ? "true" : "false"}`;
       params.push(v); return `${ident(c)} ${op} $${params.length}`;
     }).join(" and ");
   }
@@ -102,7 +104,8 @@ class Query implements PromiseLike<{ data: unknown; error: unknown; count?: numb
         const keys = [...new Set(this.rows.flatMap((r) => Object.keys(r)))];
         const values = this.rows.map((r) => "(" + keys.map((k) => (k in r ? this.val(k, r[k], params) : "default")).join(", ") + ")").join(", ");
         sql = `insert into public.${ident(this.table)} (${keys.map(ident).join(", ")}) values ${values}`;
-        if (this.op === "upsert") sql += ` on conflict (${(this.conflict || pkeys[this.table]!).split(",").map((c) => ident(c.trim())).join(", ")}) do update set ${keys.map((k) => `${ident(k)} = excluded.${ident(k)}`).join(", ")}`;
+        const target = (this.conflict || pkeys[this.table]!).split(",").map((c) => ident(c.trim())).join(", ");
+        if (this.op === "upsert") sql += this.ignoreDup ? ` on conflict (${target}) do nothing` : ` on conflict (${target}) do update set ${keys.map((k) => `${ident(k)} = excluded.${ident(k)}`).join(", ")}`;
         sql += " returning *";
       } else if (this.op === "update") {
         const sets = Object.entries(this.patch).map(([k, v]) => `${ident(k)} = ${this.val(k, v, params)}`).join(", ");

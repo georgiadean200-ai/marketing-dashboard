@@ -11,6 +11,8 @@ Shopify stores: The Tile Collective (`ttc`, premium, design-led) and Cheap Tiles
 - **Never invent product facts.** Products come from Shopify via `src/lib/shopify/sync.ts`; AI drafts must pass
   `src/lib/content/facts.ts`. Missing data stays missing.
 - **Keep brands isolated.** Every product, image, post, campaign and job is scoped by `brand_id`; database triggers enforce it.
+- **Creator content needs permission.** UGC (`ugc_items`) is never downloaded, approved, scheduled or published without
+  recorded permission (`ugc_permission_ok`). Never add scraping, session cookies or unofficial Instagram APIs.
 - **Secrets only in environment variables.** Never ask the user to paste keys into chat; never log or return them.
 
 ## How it fits together

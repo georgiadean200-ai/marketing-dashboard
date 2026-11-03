@@ -9,7 +9,7 @@
     "start": "next start",
     "build:ui": "node scripts/build-studio-ui.mjs",
     "typecheck": "tsc --noEmit",
-    "test": "npm run build:ui && node --conditions=react-server --import tsx --test --test-timeout=200000 tests/unit.test.ts tests/planner.test.ts tests/integration.test.ts",
+    "test": "npm run build:ui && node --conditions=react-server --import tsx --test --test-timeout=200000 tests/unit.test.ts tests/planner.test.ts tests/ugc.test.ts tests/integration.test.ts",
     "import:artifact": "tsx --env-file=.env.local --conditions=react-server scripts/import-artifact-export.ts",
     "test:db": "bash supabase/run-db-tests.sh"
   },

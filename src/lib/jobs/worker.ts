@@ -6,6 +6,9 @@ import { runPlanner } from "@/lib/ai/planner";
 import { supabaseStore } from "@/lib/ai/store";
 import { model } from "@/lib/ai/anthropic";
 import { env } from "@/lib/env";
+import { discoverBrand } from "@/lib/ugc/discover";
+import { recommendUgc, type RecModel } from "@/lib/ugc/recommender";
+import { ugcStore } from "@/lib/ugc/store";
 
 type Job = { id: number; type: string; brand_id: string | null; payload: Record<string, unknown>; attempts: number };
 
@@ -23,6 +26,13 @@ async function handle(job: Job): Promise<unknown> {
     }
     await db.rpc("log_event", { p_brand: job.brand_id, p_action: "AI plan finished", p_detail: `${result.createdIds.length} drafts saved, ${result.rejected.length} rejected by fact checks`, p_agent: "planner" });
     return result;
+  }
+  if (job.type === "ugc.discover") return discoverBrand(job.brand_id, { db });
+  if (job.type === "ugc.recommend") {
+    const ids = (job.payload as { ids?: string[] | null }).ids ?? undefined;
+    const recs = await recommendUgc({ store: await ugcStore(db, job.brand_id), model: model() as unknown as RecModel, modelName: env().ANTHROPIC_MODEL, ids, limit: ids?.length ?? 12 });
+    await db.rpc("log_event", { p_brand: job.brand_id, p_action: "UGC recommendations", p_detail: `${recs.filter((r) => r.suggestion.fit).length} recommended of ${recs.length} reviewed`, p_agent: "ugc-recommender" });
+    return { reviewed: recs.length, recommended: recs.filter((r) => r.suggestion.fit).length, ids: recs.map((r) => r.id) };
   }
   throw new Error(`No handler for ${job.type}`);
 }

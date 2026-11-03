@@ -15,6 +15,7 @@ The dashboard's design and behaviour are carried over unchanged from the Claude 
 | `src/lib/shopify/` | One Shopify app connection per store, token refresh, throttled product sync |
 | `src/lib/ai/` | Server-side AI planner (weekly/monthly plans, drafts, fact checks) |
 | `src/lib/content/facts.ts` | Blocks invented prices, stock, sizes, slip ratings and unlinked products |
+| `src/lib/ugc/`, `src/lib/instagram/` | UGC Discovery: Instagram tags/mentions, Later import, scoring, AI recommendations, permissions (see docs/UGC.md) |
 | `src/lib/jobs/worker.ts` | Background worker for AI plans and Shopify syncs |
 | `src/app/api/` | AI, Shopify, jobs, cron, webhooks, health |
 | `legacy-ui/` | The original dashboard, unchanged, plus the adapter |
@@ -38,7 +39,7 @@ npm run dev                    # http://localhost:3000
 ## Tests
 
 ```bash
-npm run test:db    # 51 database security tests (needs a local PostgreSQL superuser; see supabase/run-db-tests.sh)
+npm run test:db    # 52 security + 27 UGC database tests (needs a local PostgreSQL superuser; see supabase/run-db-tests.sh)
 npm test           # unit, AI planner and end-to-end tests against a real local Postgres (TEST_DATABASE_URL)
 npm run typecheck
 ```

@@ -205,3 +205,97 @@ test("artifact import moves real posts, leaves demo data behind, and is safe to 
   assert.equal(again.auditImported, 0, "re-run adds no duplicate activity");
   assert.ok((await db(`select ok from public.verify_audit_chain()`)).ok);
 });
+
+// ───────── UGC Discovery ─────────
+test("UGC: discovery merges tags and mentions, spots duplicates, refreshes previews, and keeps brands apart", async () => {
+  const { discoverBrand } = await import("@/lib/ugc/discover");
+  const tile = (await db(`select title from public.products where brand_id='ttc' and active and kind='tile' order by id limit 1`)).title as string;
+  const media = (id: string, code: string, user: string, caption: string, o: Record<string, unknown> = {}) => ({ id, caption, media_type: "IMAGE",
+    media_url: `https://scontent.cdninstagram.com/${id}.jpg`, permalink: `https://www.instagram.com/p/${code}/`, timestamp: "2026-11-01T02:00:00+0000", username: user, ...o });
+  let previewVersion = 1;
+  const graph = (async (path: string, params: Record<string, string>) => {
+    if (path === "1784" && params.fields === "id,username") return { id: "1784", username: "thetilecollective" };
+    if (path === "1784/tags") return { data: [
+      media("m1", "AAA111", "Jane.Builds", `Our ensuite reno is finished! ${tile} looks amazing #reno`, { media_url: `https://scontent.cdninstagram.com/m1-v${previewVersion}.jpg` }),
+      media("m2", "AAA999", "jane.builds", `Our ensuite reno is finished! ${tile} looks amazing #bathroom`),
+      media("m3", "VID123", "smith.designs", "New kitchen splashback reveal", { media_type: "VIDEO", media_url: undefined, thumbnail_url: "https://scontent.cdninstagram.com/v.jpg" })] };
+    if (params.fields?.startsWith("mentioned_media.media_id(m4)")) return { mentioned_media: media("m4", "AAA111", "jane.builds", `Our ensuite reno is finished! ${tile} looks amazing`) };
+    throw new Error(`unexpected ${path} ${JSON.stringify(params)}`);
+  }) as never;
+  await sqlAsOwner(`insert into public.ig_mention_events(brand_id, media_id) values ('ttc','m4')`);
+  const r1 = await discoverBrand("ttc", { db: service, graph, igUserId: "1784" });
+  assert.deepEqual(r1, { added: 2, refreshed: 1, duplicates: 1, mentionsProcessed: 1 }); // m4 is the same post as m1
+  const rows = await sqlAsOwner(`select fingerprint, sources, creator_handle, status, duplicate_of, relevance_score, product_matches, preview_url from public.ugc_items where brand_id='ttc' order by fingerprint`);
+  const a = rows.find((r) => r.fingerprint === "ig:AAA111")!;
+  assert.deepEqual(a.sources.sort(), ["instagram_mention", "instagram_tag"]);
+  assert.equal(a.creator_handle, "jane.builds"); assert.ok(a.relevance_score >= 60); assert.ok(a.product_matches.length >= 1);
+  assert.ok(rows.find((r) => r.fingerprint === "ig:AAA999")!.duplicate_of, "re-shared copy marked as duplicate");
+  assert.equal(rows.find((r) => r.fingerprint === "ig:VID123")!.preview_url, "https://scontent.cdninstagram.com/v.jpg", "video uses its thumbnail");
+  previewVersion = 2;
+  const r2 = await discoverBrand("ttc", { db: service, graph, igUserId: "1784" });
+  assert.equal(r2.added, 0); assert.equal(r2.mentionsProcessed, 0);
+  assert.match((await db(`select preview_url from public.ugc_items where fingerprint='ig:AAA111'`)).preview_url, /m1-v2/, "expired preview links refreshed");
+  const cto = pgSupabase({ uid: "00000000-0000-0000-0000-0000000000ff", service: false }) as unknown as SupabaseClient;
+  assert.equal(((await cto.from("ugc_items").select("id")).data ?? []).length, 0, "someone without TTC access sees no TTC UGC");
+});
+
+test("UGC: Later import, AI recommendation, add to calendar, and permission gating end to end", async () => {
+  const { parseLaterImport } = await import("@/lib/ugc/normalize");
+  const { recommendUgc } = await import("@/lib/ugc/recommender");
+  const { ugcStore } = await import("@/lib/ugc/store");
+  const { draftFromUgc } = await import("@/lib/ugc/draft");
+  const contributor = pgSupabase({ uid: C, service: false }) as unknown as SupabaseClient;
+  const { rows } = parseLaterImport("https://www.instagram.com/p/AAA111/ @jane.builds\nhttps://www.instagram.com/p/LATER77/ @studio.interiors");
+  const ins = await contributor.from("ugc_items").upsert(rows.map((r) => ({ brand_id: "ttc", fingerprint: r.fingerprint, sources: ["later_import"], permalink: r.permalink, creator_handle: r.creator_handle })),
+    { onConflict: "brand_id,fingerprint", ignoreDuplicates: true }).select("id");
+  assert.equal(ins.error, null); assert.equal(ins.data!.length, 1, "post already found via Instagram is not imported twice");
+
+  const target = (await db(`select id from public.ugc_items where fingerprint='ig:AAA111'`)).id as string;
+  const tileId = (await db(`select product_matches[1] p from public.ugc_items where id=$1`, [target])).p as string;
+  const fake = { async create() { return { content: [{ type: "tool_use", name: "record_recommendation", input: { fit: true, opportunity: "Customer Projects", strength: 5,
+    why: "A finished ensuite that shows the tile beautifully.", caption: "A calm, finished ensuite from our community.", productIds: [tileId], suggestedDate: "2027-02-12" } }] }; } };
+  const store = await ugcStore(service, "ttc");
+  const recs = await recommendUgc({ store, model: fake, modelName: "m", now: new Date("2027-02-01T00:00:00Z"), ids: [target] });
+  assert.equal(recs[0].suggestion.fit, true);
+  assert.equal((await db(`select status from public.ugc_items where id=$1`, [target])).status, "recommended");
+  assert.equal((await (await ugcStore(service, "ttc")).candidates({ limit: 10 })).some((c) => c.id === target), false, "not re-recommended within four weeks");
+
+  const draft = await draftFromUgc(contributor, target);
+  assert.ok(draft.contentId, JSON.stringify(draft));
+  const row = await db(`select status, ugc_id, caption, product_ids from public.content_items where id=$1`, [draft.contentId]);
+  assert.equal(row.status, "Needs Review"); assert.equal(row.ugc_id, target);
+  assert.match(row.caption, /📷 @jane\.builds$/); assert.deepEqual(row.product_ids, [tileId]);
+  assert.equal((await draftFromUgc(contributor, target)).already, true, "adding twice doesn't duplicate the draft");
+
+  // Through the real dashboard: quality check flags missing permission, approval is refused, then allowed once granted.
+  const g = await openStudio(G, { ttc: "admin", cto: "admin" });
+  g.w.location.hash = "ugc"; await sleep(150);
+  assert.ok(g.w.document.querySelector('.nav[data-p="ugc"]'), "UGC Discovery is in the sidebar");
+  assert.match(g.w.document.querySelector("#view")!.textContent!, /@jane\.builds/);
+  assert.ok(g.S(`qc(S.items.find(i=>i.id==="${draft.contentId}")).some(x=>x.l==="error"&&/permission/.test(x.m))`), "studio flags the missing permission");
+  const refused = await g.S(`SB.rpc("approve_content",{p_content:"${draft.contentId}"})`);
+  assert.match(refused.error.message, /without current permission/);
+  const saveBtn = g.w.document.querySelector(`[data-a="ugcSave"][data-id="${target}"]`) as HTMLButtonElement;
+  assert.ok(saveBtn.disabled, "Save to Content Library is disabled until permission is granted");
+  await g.click(`[data-a="ugcPerm"][data-id="${target}"]`);
+  (g.w.document.querySelector("#pm-status") as HTMLSelectElement).value = "Permission granted";
+  (g.w.document.querySelector("#pm-evidence") as HTMLTextAreaElement).value = "Instagram DM reply 11 Nov 2026: \"Yes, happy for you to share with credit\"";
+  (g.w.document.querySelector('.pm-scope[value="organic_social"]') as HTMLInputElement).checked = true;
+  await g.click('#modal [data-m="1"]'); await sleep(400);
+  const perm = await db(`select permission_status, usage_scope, attribution, permission_recorded_by from public.ugc_items where id=$1`, [target]);
+  assert.deepEqual([perm.permission_status, perm.usage_scope, perm.attribution, perm.permission_recorded_by], ["Permission granted", ["organic_social"], "📷 @jane.builds", G]);
+  assert.equal((await db(`select count(*)::int n from public.ugc_permission_events where ugc_id=$1`, [target])).n, 1);
+  await g.S(`LOADERS.ugc_items().then(render)`); await sleep(200);
+  assert.ok(!g.S(`qc(S.items.find(i=>i.id==="${draft.contentId}")).some(x=>/permission/.test(x.m))`), "permission warning cleared");
+  await g.S(`approve("${draft.contentId}")`); await sleep(400);
+  assert.equal((await db(`select status from public.content_items where id=$1`, [draft.contentId])).status, "Approved");
+
+  // A Contributor can mark permission requested but not record the creator's decision.
+  const c = await openStudio(C, { ttc: "contributor" });
+  const other = (await db(`select id from public.ugc_items where fingerprint='ig:VID123'`)).id as string;
+  const asked = await c.S(`SB.from("ugc_items").update({permission_status:"Permission requested",permission_requested_via:"Instagram DM"}).eq("id","${other}")`);
+  assert.equal(asked.error, null);
+  const grant = await c.S(`SB.from("ugc_items").update({permission_status:"Permission granted",permission_evidence:"they said yes",usage_scope:["organic_social"],attribution:"x"}).eq("id","${other}")`);
+  assert.match(grant.error.message, /Only approvers/);
+  assert.deepEqual([...g.errors, ...c.errors], []);
+});

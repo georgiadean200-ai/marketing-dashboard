@@ -11,7 +11,8 @@ parts[last] = parts[last].replace(/\ninit\(\);\s*<\/script>\s*<\/body>\s*<\/html
 if (parts[last].includes("</script>")) throw new Error("Unexpected end of 07-events.js; the init() call was not found");
 // Functions the adapter replaces. The originals are renamed (kept for reference, never called) so the bundle is
 // valid even in strict mode and nothing depends on duplicate declarations.
-const adapter = read("08-standalone.js");
+// The adapter and feature files that run on top of the original studio (in order).
+const adapter = ["08-standalone.js", "09-ugc.js"].map(read).join("\n");
 const replaced = [...adapter.matchAll(/^(?:async )?function (\w+)\(/gm)].map((m) => m[1]);
 let original = parts.join("\n");
 for (const name of replaced) {

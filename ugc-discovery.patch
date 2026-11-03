@@ -1,0 +1,1962 @@
+From bfd4f59dfe8b4dd9accfb8dd0b88bfb63a62f9f5 Mon Sep 17 00:00:00 2001
+From: Studio build <studio@local>
+Date: Tue, 3 Nov 2026 00:55:52 +0000
+Subject: [PATCH] Add UGC Discovery: Instagram tags and mentions, Later import,
+ creator permissions, AI recommendations
+
+- New sidebar page UGC Discovery (existing design components only)
+- Official Instagram API (Facebook Login): tagged posts and mention webhooks; no scraping or private APIs
+- Manual import for Later Tags/Mentions/Media Library (Later has no API for these)
+- Creator permission tracking with evidence, usage scope, expiry and credit; enforced in the database
+- AI agent recommends opportunities with original captions, verified Shopify products and dates
+- Duplicate detection across sources; weekly discovery and recommendations (drafts only)
+- Migration 20261110000600_ugc.sql; 27 new database tests and 11 new app tests
+---
+ .env.example                               |  10 +
+ CLAUDE.md                                  |   2 +
+ README.md                                  |   3 +-
+ docs/UGC.md                                |  66 +++++
+ docs/UPGRADE-UGC.md                        |  76 ++++++
+ legacy-ui/08-standalone.js                 |   4 +-
+ legacy-ui/09-ugc.js                        | 173 ++++++++++++
+ package.json                               |   2 +-
+ scripts/build-studio-ui.mjs                |   3 +-
+ src/app/api/cron/ugc/route.ts              |  29 ++
+ src/app/api/instagram/webhooks/route.ts    |  42 +++
+ src/app/api/ugc/[brand]/discover/route.ts  |  17 ++
+ src/app/api/ugc/[brand]/import/route.ts    |  23 ++
+ src/app/api/ugc/[brand]/recommend/route.ts |  23 ++
+ src/app/api/ugc/item/[id]/draft/route.ts   |  12 +
+ src/app/api/ugc/item/[id]/save/route.ts    |  44 +++
+ src/lib/content/constants.ts               |   3 +-
+ src/lib/env.ts                             |   3 +
+ src/lib/instagram/client.ts                |  37 +++
+ src/lib/jobs/worker.ts                     |  10 +
+ src/lib/ugc/discover.ts                    |  81 ++++++
+ src/lib/ugc/draft.ts                       |  26 ++
+ src/lib/ugc/normalize.ts                   |  61 +++++
+ src/lib/ugc/recommender.ts                 | 111 ++++++++
+ src/lib/ugc/score.ts                       |  69 +++++
+ src/lib/ugc/store.ts                       |  49 ++++
+ src/proxy.ts                               |   2 +-
+ supabase/migrations/20261110000600_ugc.sql | 296 +++++++++++++++++++++
+ supabase/run-db-tests.sh                   |   1 +
+ supabase/tests_security.sql                |   6 +-
+ supabase/tests_ugc.sql                     |  57 ++++
+ tests/integration.test.ts                  |  94 +++++++
+ tests/support/pg-supabase.ts               |   9 +-
+ tests/ugc.test.ts                          | 104 ++++++++
+ vercel.json                                |  21 +-
+ 35 files changed, 1554 insertions(+), 15 deletions(-)
+ create mode 100644 docs/UGC.md
+ create mode 100644 docs/UPGRADE-UGC.md
+ create mode 100644 legacy-ui/09-ugc.js
+ create mode 100644 src/app/api/cron/ugc/route.ts
+ create mode 100644 src/app/api/instagram/webhooks/route.ts
+ create mode 100644 src/app/api/ugc/[brand]/discover/route.ts
+ create mode 100644 src/app/api/ugc/[brand]/import/route.ts
+ create mode 100644 src/app/api/ugc/[brand]/recommend/route.ts
+ create mode 100644 src/app/api/ugc/item/[id]/draft/route.ts
+ create mode 100644 src/app/api/ugc/item/[id]/save/route.ts
+ create mode 100644 src/lib/instagram/client.ts
+ create mode 100644 src/lib/ugc/discover.ts
+ create mode 100644 src/lib/ugc/draft.ts
+ create mode 100644 src/lib/ugc/normalize.ts
+ create mode 100644 src/lib/ugc/recommender.ts
+ create mode 100644 src/lib/ugc/score.ts
+ create mode 100644 src/lib/ugc/store.ts
+ create mode 100644 supabase/migrations/20261110000600_ugc.sql
+ create mode 100644 supabase/tests_ugc.sql
+ create mode 100644 tests/ugc.test.ts
+
+diff --git a/.env.example b/.env.example
+index ae11f72..440e7d8 100644
+--- a/.env.example
++++ b/.env.example
+@@ -24,3 +24,13 @@ CRON_SECRET=                                      # SECRET
+ 
+ # Public URL of the deployed app, used in sign-in emails.
+ NEXT_PUBLIC_SITE_URL=https://studio.example.com
++
++# Instagram (Meta) for UGC Discovery. One Instagram professional account per brand, each with a long-lived
++# system-user token from Meta Business settings. Read-only permissions; see docs/UGC.md.
++META_GRAPH_VERSION=v25.0
++META_TTC_IG_USER_ID=
++META_TTC_ACCESS_TOKEN=                            # SECRET
++META_CTO_IG_USER_ID=
++META_CTO_ACCESS_TOKEN=                            # SECRET
++META_APP_SECRET=                                  # SECRET (verifies mention webhooks)
++META_WEBHOOK_VERIFY_TOKEN=                        # any long random string you also enter in the Meta app dashboard
+diff --git a/CLAUDE.md b/CLAUDE.md
+index 3d4dcd2..539f887 100644
+--- a/CLAUDE.md
++++ b/CLAUDE.md
+@@ -11,6 +11,8 @@ Shopify stores: The Tile Collective (`ttc`, premium, design-led) and Cheap Tiles
+ - **Never invent product facts.** Products come from Shopify via `src/lib/shopify/sync.ts`; AI drafts must pass
+   `src/lib/content/facts.ts`. Missing data stays missing.
+ - **Keep brands isolated.** Every product, image, post, campaign and job is scoped by `brand_id`; database triggers enforce it.
++- **Creator content needs permission.** UGC (`ugc_items`) is never downloaded, approved, scheduled or published without
++  recorded permission (`ugc_permission_ok`). Never add scraping, session cookies or unofficial Instagram APIs.
+ - **Secrets only in environment variables.** Never ask the user to paste keys into chat; never log or return them.
+ 
+ ## How it fits together
+diff --git a/README.md b/README.md
+index 81b6e7c..9c4a31f 100644
+--- a/README.md
++++ b/README.md
+@@ -15,6 +15,7 @@ The dashboard's design and behaviour are carried over unchanged from the Claude
+ | `src/lib/shopify/` | One Shopify app connection per store, token refresh, throttled product sync |
+ | `src/lib/ai/` | Server-side AI planner (weekly/monthly plans, drafts, fact checks) |
+ | `src/lib/content/facts.ts` | Blocks invented prices, stock, sizes, slip ratings and unlinked products |
++| `src/lib/ugc/`, `src/lib/instagram/` | UGC Discovery: Instagram tags/mentions, Later import, scoring, AI recommendations, permissions (see docs/UGC.md) |
+ | `src/lib/jobs/worker.ts` | Background worker for AI plans and Shopify syncs |
+ | `src/app/api/` | AI, Shopify, jobs, cron, webhooks, health |
+ | `legacy-ui/` | The original dashboard, unchanged, plus the adapter |
+@@ -38,7 +39,7 @@ npm run dev                    # http://localhost:3000
+ ## Tests
+ 
+ ```bash
+-npm run test:db    # 51 database security tests (needs a local PostgreSQL superuser; see supabase/run-db-tests.sh)
++npm run test:db    # 52 security + 27 UGC database tests (needs a local PostgreSQL superuser; see supabase/run-db-tests.sh)
+ npm test           # unit, AI planner and end-to-end tests against a real local Postgres (TEST_DATABASE_URL)
+ npm run typecheck
+ ```
+diff --git a/docs/UGC.md b/docs/UGC.md
+new file mode 100644
+index 0000000..594decc
+--- /dev/null
++++ b/docs/UGC.md
+@@ -0,0 +1,66 @@
++# UGC Discovery (researched and built November 2026)
++
++## What can connect to what
++
++| Source | How it works in the studio | Why |
++|---|---|---|
++| **Instagram posts the brand is tagged in** | **Automatic** via Meta's official Instagram API (`GET /{ig-user-id}/tags`). Checked weekly and on demand. | Meta lists tagged posts for a brand's own professional account. |
++| **Instagram caption @mentions** | **Automatic from setup onwards** via Meta's `mentions` webhook, then `mentioned_media`. | Meta only sends mentions as they happen and doesn't store them; past mentions can't be fetched. |
++| **Later: Tags, Mentions, Media Library, collected UGC** | **Manual import**: paste post links (or a CSV) into *Import from Later*. | Later's Collect features work only inside Later; Later documents no API for reading them. |
++| **Instagram Story mentions** | Not available | Meta's API doesn't support Story mentions. |
++| Hashtag search, scraping, session cookies, private APIs | Not used | Not needed for tags and mentions, and scraping/unofficial access breaks Instagram's terms. |
++
++Limits from Meta to know about: tags only appear once the tag is approved on Instagram; posts from private accounts
++don't trigger mention webhooks; and `media_url` is omitted for videos with licensed audio or reels whose owner turned
++off downloads (the studio shows the thumbnail or a link instead).
++
++## How the feature works
++
++1. **Discover**: tagged posts and webhook mentions are stored per brand with the creator's handle, caption, link,
++   date and a short-lived preview link from Meta. **No third-party file is downloaded at this stage.**
++2. **Deduplicate**: one record per post per brand (by Instagram shortcode, across tags, mentions and Later imports),
++   and re-shares of the same caption by the same creator are marked as duplicates.
++3. **Score**: an explainable 0–100 brand relevance score (names a catalogue product, shows a finished space, real
++   project, builder/designer account, before-and-after, recency) and text-based product suggestions.
++4. **Recommend**: the AI agent reviews the strongest posts (image and caption), picks one of Monday Inspiration,
++   Save This Space, Customer Projects, Builder and Designer Features, Before and After, Product Features or
++   Instagram Stories, writes an original caption, chooses products **only from the brand's verified Shopify
++   catalogue**, and suggests a free date. Captions that state unverified facts are held back. Posts already used,
++   dismissed, on the calendar or recommended in the last four weeks are not recommended again.
++5. **Permission**: Not requested → Requested → Granted / Declined, with evidence, usage scope (feed, Stories, ads,
++   website, email, print), optional expiry and the credit line. Every change is kept permanently.
++   **Contributors** can mark a request as sent; **Approvers** record the creator's decision.
++6. **Use**: *Add to calendar* creates a draft for review. **The database refuses to approve, schedule or mark it
++   published unless permission is granted for social use and hasn't expired.** *Save to Content Library* copies the
++   creator's file into private storage only after permission; the saved image still needs normal image approval.
++
++Weekly automation (Monday 7 am Brisbane): check for new content, then prepare recommendations. Nothing is drafted to
++the calendar, approved or published automatically.
++
++## Setting up Instagram access (one Instagram account per brand)
++
++You need: each brand's Instagram as a **professional (Business) account linked to a Facebook Page**, and admin access to
++your Meta Business portfolio. Menu names change occasionally.
++
++1. **developers.facebook.com → My Apps → Create app**, type **Business**, linked to your business portfolio.
++   Add the **Instagram** product and choose **Instagram API with Facebook Login**.
++2. **Meta Business Settings → Users → System users → Add** (Admin). Assign it the brand's **Facebook Page** and
++   **Instagram account** as assets.
++3. **Generate a token** for the system user with your app, choosing permissions for reading tags and mentions
++   (Meta's docs list `instagram_basic` and `instagram_manage_comments`, with `pages_show_list`,
++   `pages_read_engagement` and `business_management` for Page-linked access). Choose **never expire**.
++   Because the accounts are your own, **Standard Access** is enough; no app review is needed for your own accounts.
++4. Find the **Instagram user ID** (Graph API Explorer: `me/accounts?fields=instagram_business_account`).
++5. In **Vercel → Settings → Environment Variables** add, per brand: `META_TTC_IG_USER_ID`, `META_TTC_ACCESS_TOKEN`
++   (and `META_CTO_…` for Cheap Tiles Online). Never paste tokens anywhere else.
++6. **Mentions webhook** (optional but recommended): in the app's Instagram → Webhooks, set the callback URL to
++   `https://<your-app>/api/instagram/webhooks`, choose a verify token (any long random string) and subscribe to the
++   **mentions** field. Add `META_APP_SECRET` (App settings → Basic) and `META_WEBHOOK_VERIFY_TOKEN` to Vercel.
++   Meta requires the app to be in **Live** mode for webhooks, and may require your business to be **verified**.
++7. Redeploy, then in UGC Discovery click **Check for new content**.
++
++## Permission and credit practice
++
++Ask before sharing, keep the reply, and credit the creator as agreed. The studio drafts the request message for you
++to send from Instagram yourself; it never messages creators. If a creator later withdraws permission, set
++**Permission declined**: scheduling and publishing of any post using their content is then refused.
+diff --git a/docs/UPGRADE-UGC.md b/docs/UPGRADE-UGC.md
+new file mode 100644
+index 0000000..ad2cf10
+--- /dev/null
++++ b/docs/UPGRADE-UGC.md
+@@ -0,0 +1,76 @@
++# Upgrading your live studio with UGC Discovery
++
++About 20 minutes, plus Meta setup (docs/UGC.md). Do the steps in this order: **database first, then code**.
++The new code expects the new tables; the new tables are harmless to the current code.
++
++## 1. Back up (2 minutes)
++
++Supabase → **Database → Backups**: confirm today's automatic backup exists (or, on the free plan, run
++`supabase db dump` from the CLI). In GitHub, nothing to do: the change arrives as one commit you can revert.
++
++## 2. Update the database (5 minutes)
++
++Supabase → **SQL Editor** → New query → paste **`supabase/migrations/20261110000600_ugc.sql`** → **Run**.
++It should finish with "Success". It:
++
++- adds `instagram_connections`, `ig_mention_events`, `ugc_items`, `ugc_permission_events`
++- adds `ugc_id` to `assets` and `content_items`
++- updates `approve_content`, `mark_scheduled_manual`, `mark_published_manual` and `enqueue_job` so they refuse
++  creator content without current permission (existing behaviour is otherwise unchanged)
++
++Run it once only. If you use the Supabase CLI instead: `supabase db push`.
++
++## 3. Update the code on GitHub (5 minutes)
++
++Pick one:
++
++**A. With git on your computer (recommended):** in your local copy of the repository, on an up-to-date `main`:
++```bash
++git checkout -b ugc-discovery
++git am < ugc-discovery.patch        # applies the change as one commit with its message
++npm install && npm run typecheck    # optional local check
++git push -u origin ugc-discovery    # then open a pull request and merge it
++```
++If `git am` reports a conflict (only possible if you've edited the same files since deploying), use option B.
++
++**B. Without git:** unzip `ugc-discovery-files.zip` over your project folder (it contains only new and changed
++files, in their folders), then upload/commit them on GitHub. The full list is in `CHANGED-FILES.txt`.
++
++## 4. Add settings in Vercel (5 minutes)
++
++Vercel → your project → **Settings → Environment Variables** (Production and Preview):
++
++| Name | Value |
++|---|---|
++| `META_GRAPH_VERSION` | `v25.0` |
++| `META_TTC_IG_USER_ID` | The Tile Collective's Instagram user ID |
++| `META_TTC_ACCESS_TOKEN` | TTC system-user token (**secret**) |
++| `META_CTO_IG_USER_ID` / `META_CTO_ACCESS_TOKEN` | Cheap Tiles Online's, when ready |
++| `META_APP_SECRET` | Meta app secret (**secret**, for mention webhooks) |
++| `META_WEBHOOK_VERIFY_TOKEN` | A long random string you also enter in the Meta webhook settings |
++
++You can deploy before the Meta values exist: the page works with **Import from Later**, and shows Instagram as
++not connected.
++
++## 5. Deploy
++
++Merging to `main` (or pushing) triggers a Vercel deployment automatically. The new weekly job
++(`/api/cron/ugc`, Mondays 7 am Brisbane) is added from `vercel.json`. After it's live, Vercel → **Settings → Cron Jobs**
++should list four jobs.
++
++## 6. Check it works
++
++1. While signed in, open `/api/health`: `instagramTtc` should be `true` once its variables are set.
++2. Open **UGC Discovery** in the sidebar (under Create).
++3. **Import from Later:** paste two Instagram post links you've collected in Later, for example
++   `https://www.instagram.com/p/XXXX/ @creator`. They appear as cards (no preview for imported links).
++4. **Check for new content** (needs the Meta settings): tagged posts appear with previews and relevance scores.
++5. On a card, **Generate caption**, then **Add to calendar**. Open the draft: Quality check shows the permission error.
++6. **Permission…** → send the copied message from Instagram → set *Permission requested*. When the creator agrees,
++   set *Permission granted* with their reply as evidence and tick *Instagram and Facebook feed*.
++7. The draft's permission error clears and it can be approved; **Save to Content Library** becomes available.
++
++## Rolling back
++
++Code: revert the merge commit in GitHub; Vercel redeploys the previous version. The database tables can stay;
++the previous code ignores them. (The updated approval functions only add the creator-permission check.)
+diff --git a/legacy-ui/08-standalone.js b/legacy-ui/08-standalone.js
+index f6bb2bc..33d391f 100644
+--- a/legacy-ui/08-standalone.js
++++ b/legacy-ui/08-standalone.js
+@@ -25,7 +25,7 @@ const toItem = (r) => ({ id: r.id, brand: r.brand_id, campaignId: r.campaign_id
+   scheduledAt: isoLocal(r.scheduled_at), caption: r.caption, hashtags: r.hashtags || [], productIds: r.product_ids || [], mediaIds: r.asset_ids || [],
+   slides: r.slides || [], shots: r.shots || [], brief: r.brief, direction: r.direction, status: r.status, reviewNote: r.review_note,
+   approvalId: r.approval_id, approvedFingerprint: r.client_fingerprint, publishStatus: r.publish_status, publishedAt: isoLocal(r.published_at),
+-  archived: r.archived, demo: r.demo, revision: r.revision, createdBy: r.created_by_agent ? "ai" : (r.created_by || ""), createdAt: r.created_at, updatedAt: r.updated_at });
++  archived: r.archived, demo: r.demo, revision: r.revision, ugcId: r.ugc_id || null, createdBy: r.created_by_agent ? "ai" : (r.created_by || ""), createdAt: r.created_at, updatedAt: r.updated_at });
+ const fromItem = (it) => ({ brand_id: it.brand, campaign_id: it.campaignId || null, title: it.title || "", series: it.series || "", channel: it.channel, format: it.format,
+   scheduled_at: localIso(it.scheduledAt), caption: it.caption || "", hashtags: it.hashtags || [], product_ids: it.productIds || [], asset_ids: it.mediaIds || [],
+   slides: it.slides || [], shots: it.shots || [], brief: it.brief || "", direction: it.direction || "", review_note: it.reviewNote || "", archived: !!it.archived,
+@@ -92,7 +92,7 @@ async function init() {
+   catch (e) { console.error(e); S.mode = "slow"; }
+   render();
+   const ch = SB.channel("studio-live");
+-  ["content_items", "approvals", "audit_log", "campaigns", "assets", "settings", "shopify_connections", "brands"].forEach((t) =>
++  ["content_items", "approvals", "audit_log", "campaigns", "assets", "settings", "shopify_connections", "brands", "ugc_items", "instagram_connections"].forEach((t) =>
+     ch.on("postgres_changes", { event: "*", schema: "public", table: t }, () => refresh(t)));
+   ch.subscribe();
+   setInterval(() => refresh("assets"), 45 * 60e3); // signed image links last an hour
+diff --git a/legacy-ui/09-ugc.js b/legacy-ui/09-ugc.js
+new file mode 100644
+index 0000000..29be9d0
+--- /dev/null
++++ b/legacy-ui/09-ugc.js
+@@ -0,0 +1,173 @@
++
++/* ═════════ UGC Discovery ═════════
++   Creator content that tags or mentions the brand on Instagram, plus posts imported from Later by hand.
++   Uses only the studio's existing components and styles. Permission rules are enforced by the database. */
++const PERMS = ["Permission not requested", "Permission requested", "Permission granted", "Permission declined"];
++const PERM_CLASS = { "Permission not requested": "st-idea", "Permission requested": "st-needs-review", "Permission granted": "st-approved", "Permission declined": "st-failed" };
++const SCOPES = [["organic_social", "Instagram and Facebook feed"], ["stories", "Stories"], ["paid_ads", "Paid ads"], ["website", "Website"], ["email", "Email"], ["print", "Print"]];
++const SOURCE_LABEL = { instagram_tag: "Tagged", instagram_mention: "Mention", later_import: "From Later", manual: "Added by hand" };
++const OPPS = ["Monday Inspiration", "Save This Space", "Customer Projects", "Builder and Designer Features", "Before and After", "Product Features", "Instagram Stories"];
++S.ugc = []; S.igConn = {}; S.ugcF = { view: "open", perm: "", source: "", opp: "", q: "" }; S.ugcMsg = null; S.ugcBusy = "";
++["Builder and Designer Features", "Before and After"].forEach((s) => { if (!SERIES.includes(s)) SERIES.push(s); });
++
++// Sidebar entry, title and icon
++(() => { const create = NAV.find((g) => g[0] === "Create"); const i = create[1].findIndex((x) => x[0] === "media"); create[1].splice(i + 1, 0, ["ugc", "UGC Discovery"]); })();
++TITLES.ugc = "UGC Discovery";
++IC.ugc = '<rect x="3" y="6" width="18" height="14" rx="2"/><circle cx="12" cy="13" r="3.5"/><path d="M8 6l1.5-2h5L16 6"/>';
++
++// Data
++LOADERS.ugc_items = async () => {
++  const { data } = await SB.from("ugc_items").select("*").order("relevance_score", { ascending: false }).limit(1000);
++  S.ugc = data || [];
++};
++LOADERS.instagram_connections = async () => {
++  const { data } = await SB.from("instagram_connections").select("*"); const o = {}; (data || []).forEach((c) => o[c.brand_id] = c); S.igConn = o;
++};
++
++// Posts that use creator content show the permission check in Quality check (and approval is refused in the database).
++function qc(it) {
++  const out = __original_qc(it);
++  const u = it.ugcId && S.ugc.find((x) => x.id === it.ugcId);
++  if (it.ugcId) {
++    const ok = u && u.permission_status === "Permission granted" && (u.usage_scope || []).includes("organic_social") && (!u.usage_expires_on || u.usage_expires_on >= ymd(new Date()));
++    if (!ok) { out.unshift({ l: "error", m: `Uses @${u?.creator_handle || "a creator"}'s post without current permission for social use. Record their permission in UGC Discovery.` }); const i = out.findIndex((o) => o.l === "ok"); if (i >= 0) out.splice(i, 1); }
++  }
++  return out;
++}
++
++const ugcOpen = (u) => ["new", "shortlisted", "recommended"].includes(u.status) && !u.duplicate_of;
++const permPill = (s) => `<span class="pill ${PERM_CLASS[s] || "st-idea"}"><i></i>${esc(s)}</span>`;
++function ugcThumb(u) {
++  const fallback = `<div class="sw nophoto">Preview unavailable<br>open on Instagram</div>`;
++  if (!u.preview_url) return fallback;
++  return `<img class="sw" src="${esc(u.preview_url)}" alt="Post by @${esc(u.creator_handle)}" loading="lazy" referrerpolicy="no-referrer" onerror="this.outerHTML='<div class=&quot;sw nophoto&quot;>Preview expired<br>check for new content</div>'">`;
++}
++function ugcCard(u) {
++  const s = u.suggestion || null, granted = u.permission_status === "Permission granted" && (u.usage_scope || []).includes("organic_social");
++  const prods = (s?.fit ? s.productIds : null) || u.product_matches || [];
++  const onCal = S.items.find((i) => i.ugcId === u.id && !i.archived);
++  const cap = String(u.caption || "");
++  return `<article class="pcard">${ugcThumb(u)}<div class="pb">
++  <div class="row" style="justify-content:space-between"><a href="${esc(u.permalink)}" target="_blank" rel="noopener" style="font-weight:500;color:var(--ink)">@${esc(u.creator_handle || "unknown")}</a>
++   <span class="row" style="gap:4px">${(u.sources || []).map((x) => `<span class="tag">${esc(SOURCE_LABEL[x] || x)}</span>`).join("")}</span></div>
++  <span class="small muted">${u.posted_at ? new Date(u.posted_at).toLocaleDateString("en-AU", { day: "numeric", month: "short", year: "numeric" }) : "Date unknown"} · ${esc(u.platform)}${u.media_type ? " · " + esc(u.media_type.replace("_ALBUM", "").toLowerCase()) : ""}</span>
++  ${cap ? `<p class="small" style="margin:0;white-space:pre-wrap">${esc(cap.length > 240 ? cap.slice(0, 240) + "…" : cap)}</p>` : `<p class="small faint" style="margin:0">No caption on file.</p>`}
++  <div class="row" style="gap:6px">${u.relevance_score != null ? `<span class="flag" title="${esc((u.relevance_reasons || []).join(" · "))}">Relevance ${u.relevance_score}</span>` : ""}${permPill(u.permission_status)}</div>
++  ${(u.relevance_reasons || []).length ? `<span class="small faint">${esc(u.relevance_reasons.slice(0, 3).join(" · "))}</span>` : ""}
++  ${prods.length ? `<div class="small"><span class="muted">Suggested products (confirm):</span> ${prods.map((id) => prod(id)).filter(Boolean).map((p) => `<span class="tag">${esc(p.name)}</span>`).join(" ")}</div>` : ""}
++  ${s ? (s.fit ? `<div class="notice lime" style="margin:4px 0 0;flex-direction:column;gap:6px"><span><b>${esc(s.opportunity)}</b> · ${esc(fmtD(s.suggestedDate + "T18:00"))}${s.strength ? ` · ${"●".repeat(s.strength)}${"○".repeat(5 - s.strength)}` : ""}</span><span class="small">${esc(s.why)}</span>${s.caption ? `<span class="small" style="white-space:pre-wrap;color:var(--ink)">${esc(s.caption)}\n\n${esc(s.credit || "")}</span>` : `<span class="small" style="color:var(--s-failed)">Caption held back by fact checks: ${esc((s.problems || []).join("; "))}</span>`}</div>`
++    : `<span class="small muted">Not recommended: ${esc(s.why)}</span>`) : ""}
++  ${u.duplicate_of ? `<span class="small faint">Duplicate of an earlier post; hidden from recommendations.</span>` : ""}
++  <div class="row" style="margin-top:auto;padding-top:8px;gap:6px">
++   <button class="btn sm" data-a="ugcPerm" data-id="${u.id}">Permission…</button>
++   <button class="btn sm" data-a="ugcGen" data-id="${u.id}" ${S.ugcBusy ? "disabled" : ""}>${s?.caption ? "Regenerate caption" : "Generate caption"}</button>
++   ${onCal ? `<button class="btn sm" data-a="open" data-id="${onCal.id}">Open draft</button>` : `<button class="btn sm primary" data-a="ugcDraft" data-id="${u.id}" ${s?.fit && s.caption ? "" : "disabled title='Generate a caption first'"}>Add to calendar</button>`}
++   ${u.asset_id ? `<span class="tag">Saved to library</span>` : `<button class="btn sm" data-a="ugcSave" data-id="${u.id}" ${granted && u.preview_url ? "" : `disabled title="${granted ? "No downloadable media" : "Needs the creator's permission first"}"`}>Save to Content Library</button>`}
++   ${ugcOpen(u) ? `<button class="btn sm ghost" data-a="ugcDismiss" data-id="${u.id}">Dismiss</button>` : `<button class="btn sm ghost" data-a="ugcRestore" data-id="${u.id}">Restore</button>`}
++  </div></div></article>`;
++}
++function pageUgc() {
++  const b = S.brand, g = guide(b), conn = S.igConn[b], f = S.ugcF;
++  const mine = S.ugc.filter((u) => u.brand_id === b);
++  const q = f.q.toLowerCase();
++  const list = mine.filter((u) => (f.view === "open" ? ugcOpen(u) : f.view === "all" ? true : f.view === "recommended" ? u.suggestion?.fit && ugcOpen(u) : u.status === f.view)
++    && (!f.perm || u.permission_status === f.perm) && (!f.source || (u.sources || []).includes(f.source)) && (!f.opp || u.suggestion?.opportunity === f.opp)
++    && (!q || `${u.creator_handle} ${u.caption}`.toLowerCase().includes(q)));
++  const top = mine.filter((u) => u.suggestion?.fit && ugcOpen(u) && !S.items.some((i) => i.ugcId === u.id))
++    .sort((x, y) => (y.suggestion.strength || 0) - (x.suggestion.strength || 0) || (y.relevance_score || 0) - (x.relevance_score || 0)).slice(0, 6);
++  const row = (name, status, detail) => `<tr><td><b style="font-weight:500;color:var(--ink)">${name}</b></td><td>${status}</td><td class="small muted">${detail}</td></tr>`;
++  const sel = (k, opts, ph) => `<select data-uf="${k}" style="width:auto" aria-label="${ph}"><option value="">${ph}</option>${opts.map(([v, l]) => `<option value="${esc(v)}"${f[k] === v ? " selected" : ""}>${esc(l)}</option>`).join("")}</select>`;
++  return `<div class="row" style="justify-content:space-between;margin-bottom:18px"><p class="muted" style="margin:0;max-width:72ch">Posts where customers, designers, builders and creators feature ${esc(g.name)}. Previews come from Instagram for review and aren't stored. Nothing is downloaded or shared until the creator's permission is recorded.</p>
++  <div class="row"><button class="btn" data-a="ugcImport">Import from Later</button><button class="btn" data-a="ugcRecommend" ${S.ugcBusy ? "disabled" : ""}>${icon("assistant", 16)} Recommend opportunities</button><button class="btn primary" data-a="ugcDiscover" ${S.ugcBusy || !S.canApprove || !conn ? "disabled" : ""}>Check for new content</button></div></div>
++  ${S.ugcMsg && S.ugcMsg.brand === b ? `<p id="ugcMsg" class="small" role="status" style="margin:-6px 0 14px;${S.ugcMsg.err ? "color:var(--s-failed)" : ""}">${esc(S.ugcMsg.msg)}</p>` : ""}
++  <section class="panel scrollx" style="padding:0;margin-bottom:22px"><table><thead><tr><th>Source</th><th>Status</th><th>How it works</th></tr></thead><tbody>
++   ${row("Instagram tags", conn ? `<span class="tag">Connected · @${esc(conn.username || "")}</span>` : `<span class="tag">Not connected</span>`, conn ? `Checked ${conn.last_tags_sync_at ? ago(conn.last_tags_sync_at) : "not yet"}; weekly on Mondays.` : `Add ${esc(g.short)}'s Instagram account in the server settings (docs/UGC.md).`)}
++   ${row("Instagram caption mentions", conn ? `<span class="tag">${conn.last_mention_at ? "Receiving" : "Waiting for the first"}</span>` : `<span class="tag">Not connected</span>`, "Sent by Instagram as they happen. Earlier mentions can't be fetched.")}
++   ${row("Later Tags, Mentions and Media Library", `<span class="tag">Manual import</span>`, "Later has no API for these. Copy post links from Later and use Import from Later.")}
++   ${row("Story mentions", `<span class="tag">Not available</span>`, "Instagram's API doesn't provide Story mentions.")}</tbody></table></section>
++  ${top.length ? `<section style="margin-bottom:26px"><div class="block-head"><h2>Top opportunities</h2><span class="small muted">Recommended by the AI, not yet on the calendar</span></div><div class="pgrid">${top.map(ugcCard).join("")}</div></section>` : ""}
++  <div class="cal-bar"><div class="seg" role="tablist">${[["open", "To review"], ["recommended", "Recommended"], ["used", "Used"], ["dismissed", "Dismissed"], ["all", "All"]].map(([v, l]) => `<button role="tab" aria-selected="${f.view === v}" class="${f.view === v ? "on" : ""}" data-a="ugcView" data-v="${v}">${l}</button>`).join("")}</div>
++   <input type="search" id="ugcQ" value="${esc(f.q)}" placeholder="Search handle or caption" style="max-width:240px" aria-label="Search">
++   ${sel("perm", PERMS.map((p) => [p, p]), "Any permission")}${sel("source", Object.entries(SOURCE_LABEL), "Any source")}${sel("opp", OPPS.map((o) => [o, o]), "Any opportunity")}
++   <span style="flex:1"></span><span class="small muted">${list.length} of ${mine.length}</span></div>
++  ${list.length ? `<div class="pgrid">${list.slice(0, 120).map(ugcCard).join("")}</div>` : `<div class="panel empty"><h3>${mine.length ? "Nothing matches" : "No creator content yet"}</h3><p>${conn ? "Check for new content, or import posts you've collected in Later." : `Connect ${esc(g.short)}'s Instagram account, or import posts you've collected in Later.`}</p></div>`}`;
++}
++PAGES.ugc = pageUgc;
++
++// Permission dialog: status, evidence, what they agreed to, expiry and credit
++function permissionDialog(u) {
++  return new Promise((res) => {
++    const m = $("#modal"), prev = document.activeElement, g = guide(u.brand_id);
++    const credit = u.attribution || `📷 @${u.creator_handle}`;
++    const request = `Hi @${u.creator_handle}, we love how our tiles look in your space! Would you be happy for ${g.name} to share this post on our Instagram, with credit to you as ${credit}? Just reply "yes" here and we'll take care of the rest. Thank you!`;
++    m.innerHTML = `<div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="pt" style="width:min(560px,100%)"><h3 id="pt">Creator permission · @${esc(u.creator_handle)}</h3>
++     <div class="formstack" style="margin-top:14px;gap:12px">
++      <label class="field"><span>Status</span><select id="pm-status">${PERMS.map((p) => `<option${p === u.permission_status ? " selected" : ""}>${esc(p)}</option>`).join("")}</select></label>
++      <label class="field"><span>How you asked or heard back (e.g. Instagram DM, comment, email)</span><input type="text" id="pm-via" value="${esc(u.permission_requested_via || "")}"></label>
++      <label class="field"><span>Evidence: paste their reply, with date, or a link to it</span><textarea id="pm-evidence" rows="3">${esc(u.permission_evidence || "")}</textarea></label>
++      <div class="field"><span>What they agreed to</span><div class="row" style="gap:12px">${SCOPES.map(([v, l]) => `<label class="row small" style="gap:6px"><input type="checkbox" class="pm-scope" value="${v}" ${(u.usage_scope || []).includes(v) ? "checked" : ""}> ${l}</label>`).join("")}</div></div>
++      <div class="grid2"><label class="field"><span>Credit line</span><input type="text" id="pm-attr" value="${esc(credit)}"></label><label class="field"><span>Permission ends (optional)</span><input type="date" id="pm-exp" value="${esc(u.usage_expires_on || "")}"></label></div>
++      <div class="field"><span class="sectionlabel">Message to send the creator <button class="link" type="button" id="pm-copy">Copy</button></span><p class="small" style="margin:0;background:var(--surface-2);padding:10px;border-radius:8px">${esc(request)}</p><span class="small faint">Send it yourself from Instagram; the studio doesn't message creators.</span></div>
++      ${!S.canApprove ? `<p class="small muted" style="margin:0">You can record that permission was requested. An Approver records the creator's decision.</p>` : ""}
++     </div><div class="modal-actions" style="margin-top:16px"><button class="btn ghost" data-m="0">Cancel</button><button class="btn primary" data-m="1">Save</button></div></div>`;
++    m.hidden = false; $("#pm-status").focus();
++    $("#pm-copy").onclick = async () => { try { await navigator.clipboard.writeText(request); toast("Message copied."); } catch { toast("Select the message and copy it."); } };
++    const close = (v) => { m.hidden = true; m.innerHTML = ""; m.onclick = null; prev?.focus?.(); res(v); };
++    m.onclick = (e) => { if (e.target === m) return close(null); const b = e.target.closest("[data-m]"); if (!b) return;
++      if (b.dataset.m !== "1") return close(null);
++      close({ permission_status: $("#pm-status").value, permission_requested_via: $("#pm-via").value.trim(), permission_evidence: $("#pm-evidence").value.trim(),
++        usage_scope: [...document.querySelectorAll(".pm-scope:checked")].map((x) => x.value), attribution: $("#pm-attr").value.trim(), usage_expires_on: $("#pm-exp").value || null }); };
++  });
++}
++
++// Actions
++async function ugcJob(path, body, busyMsg) {
++  const b = S.brand; S.ugcBusy = busyMsg; S.ugcMsg = { brand: b, msg: busyMsg }; render();
++  try {
++    const { jobId } = await api(path, body || {});
++    const job = await pollJob(jobId, (j) => { const el = $("#ugcMsg"); if (el) el.textContent = j?.status === "running" ? busyMsg : "Queued…"; }, 10 * 60e3);
++    if (job?.status === "succeeded") { const r = job.result || {};
++      S.ugcMsg = { brand: b, msg: r.added != null ? `Found ${r.added} new post${r.added === 1 ? "" : "s"}${r.refreshed ? `, refreshed ${r.refreshed}` : ""}${r.duplicates ? `, skipped ${r.duplicates} duplicate${r.duplicates === 1 ? "" : "s"}` : ""}.`
++        : `Reviewed ${r.reviewed}; ${r.recommended} recommended.` }; }
++    else S.ugcMsg = { brand: b, msg: job?.last_error ? job.last_error : "Still working; results will appear here.", err: !!job?.last_error };
++  } catch (e) { S.ugcMsg = { brand: b, msg: e.message, err: true }; }
++  S.ugcBusy = ""; await LOADERS.ugc_items(); await LOADERS.instagram_connections(); render();
++}
++Object.assign(A, {
++  ugcDiscover: () => ugcJob(`/api/ugc/${S.brand}/discover`, {}, "Checking Instagram for new tags and mentions…"),
++  ugcRecommend: () => ugcJob(`/api/ugc/${S.brand}/recommend`, {}, "Reviewing posts and preparing recommendations…"),
++  ugcGen: (d) => ugcJob(`/api/ugc/${S.brand}/recommend`, { ids: [d.id] }, "Writing a caption and matching products…"),
++  ugcView: (d) => { S.ugcF.view = d.v; render(); },
++  ugcPerm: async (d) => {
++    const u = S.ugc.find((x) => x.id === d.id); if (!u) return;
++    const v = await permissionDialog(u); if (!v) return;
++    const { error } = await SB.from("ugc_items").update(v).eq("id", u.id);
++    if (error) toast(sbMsg(error), "error"); else toast("Permission record saved.");
++    await LOADERS.ugc_items(); render();
++  },
++  ugcDismiss: async (d) => { const { error } = await SB.from("ugc_items").update({ status: "dismissed" }).eq("id", d.id); if (error) toast(sbMsg(error), "error"); await LOADERS.ugc_items(); render(); },
++  ugcRestore: async (d) => { const { error } = await SB.from("ugc_items").update({ status: "new" }).eq("id", d.id); if (error) toast(sbMsg(error), "error"); await LOADERS.ugc_items(); render(); },
++  ugcSave: async (d) => {
++    try { await api(`/api/ugc/item/${d.id}/save`, {}); toast("Saved to the media library. Approve the image there before it can go in an approved post."); }
++    catch (e) { toast(e.message, "error"); }
++    await LOADERS.ugc_items(); await LOADERS.assets(); render();
++  },
++  ugcDraft: async (d) => {
++    try { const r = await api(`/api/ugc/item/${d.id}/draft`, {}); await LOADERS.content_items(); render();
++      toast(r.already ? "Already on the calendar." : "Draft added to the calendar for review."); }
++    catch (e) { toast(e.message, "error"); }
++  },
++  ugcImport: async () => {
++    const text = await ask({ title: "Import from Later", body: "Paste Instagram post links (one per line; add @handle after a link if you know it), or a CSV with columns such as url, handle, caption, date. In Later, open Media › Tags or Mentions, open each post on Instagram and copy its link.", input: true, placeholder: "https://www.instagram.com/p/… @creator", confirm: "Import" });
++    if (!text) return;
++    try { const r = await api(`/api/ugc/${S.brand}/import`, { text });
++      S.ugcMsg = { brand: S.brand, msg: `Imported ${r.added}${r.alreadyHad ? `; ${r.alreadyHad} already here` : ""}${r.errors?.length ? `; ${r.errors.length} line(s) skipped` : ""}.` }; }
++    catch (e) { S.ugcMsg = { brand: S.brand, msg: e.message, err: true }; }
++    await LOADERS.ugc_items(); render();
++  },
++});
++document.addEventListener("change", (e) => { const k = e.target.dataset?.uf; if (!k) return; S.ugcF[k] = e.target.value; pendingRender = false; render(); });
++document.addEventListener("input", (e) => {
++  if (e.target.id !== "ugcQ") return; S.ugcF.q = e.target.value; clearTimeout(window._uq);
++  window._uq = setTimeout(() => { render(); const q = $("#ugcQ"); if (q) { q.focus(); q.setSelectionRange(q.value.length, q.value.length); } }, 200);
++});
+diff --git a/package.json b/package.json
+index 3ac56ad..af9c5eb 100644
+--- a/package.json
++++ b/package.json
+@@ -9,7 +9,7 @@
+     "start": "next start",
+     "build:ui": "node scripts/build-studio-ui.mjs",
+     "typecheck": "tsc --noEmit",
+-    "test": "npm run build:ui && node --conditions=react-server --import tsx --test --test-timeout=200000 tests/unit.test.ts tests/planner.test.ts tests/integration.test.ts",
++    "test": "npm run build:ui && node --conditions=react-server --import tsx --test --test-timeout=200000 tests/unit.test.ts tests/planner.test.ts tests/ugc.test.ts tests/integration.test.ts",
+     "import:artifact": "tsx --env-file=.env.local --conditions=react-server scripts/import-artifact-export.ts",
+     "test:db": "bash supabase/run-db-tests.sh"
+   },
+diff --git a/scripts/build-studio-ui.mjs b/scripts/build-studio-ui.mjs
+index b4bd28a..be140e6 100644
+--- a/scripts/build-studio-ui.mjs
++++ b/scripts/build-studio-ui.mjs
+@@ -11,7 +11,8 @@ parts[last] = parts[last].replace(/\ninit\(\);\s*<\/script>\s*<\/body>\s*<\/html
+ if (parts[last].includes("</script>")) throw new Error("Unexpected end of 07-events.js; the init() call was not found");
+ // Functions the adapter replaces. The originals are renamed (kept for reference, never called) so the bundle is
+ // valid even in strict mode and nothing depends on duplicate declarations.
+-const adapter = read("08-standalone.js");
++// The adapter and feature files that run on top of the original studio (in order).
++const adapter = ["08-standalone.js", "09-ugc.js"].map(read).join("\n");
+ const replaced = [...adapter.matchAll(/^(?:async )?function (\w+)\(/gm)].map((m) => m[1]);
+ let original = parts.join("\n");
+ for (const name of replaced) {
+diff --git a/src/app/api/cron/ugc/route.ts b/src/app/api/cron/ugc/route.ts
+new file mode 100644
+index 0000000..f2a51af
+--- /dev/null
++++ b/src/app/api/cron/ugc/route.ts
+@@ -0,0 +1,29 @@
++import { after } from "next/server";
++import { adminClient } from "@/lib/supabase/admin";
++import { igConfigured } from "@/lib/instagram/client";
++import { runWorker } from "@/lib/jobs/worker";
++import { fail, isCron, json } from "@/lib/http";
++
++export const maxDuration = 300;
++export const dynamic = "force-dynamic";
++
++/** Weekly (Monday 7 am Brisbane): find new creator content, then prepare recommendations for approval. */
++export async function GET(req: Request) {
++  if (!isCron(req)) return fail("Unauthorised", 401);
++  const db = adminClient();
++  const week = new Date().toISOString().slice(0, 10);
++  const queued: string[] = [];
++  for (const brand of ["ttc", "cto"]) {
++    const { data: brandRow } = await db.from("brands").select("guidelines").eq("id", brand).maybeSingle();
++    if ((brandRow?.guidelines as { automation?: { ugc?: boolean } } | null)?.automation?.ugc === false) continue;
++    if (igConfigured(brand)) {
++      await db.rpc("enqueue_job", { p_type: "ugc.discover", p_brand: brand, p_payload: { reason: "weekly" }, p_dedupe: `ugc-discover-${brand}-${week}` });
++      queued.push(`${brand}:discover`);
++    }
++    await db.rpc("enqueue_job", { p_type: "ugc.recommend", p_brand: brand, p_payload: { weekly: true }, p_dedupe: `ugc-recommend-${brand}-${week}`,
++      p_run_after: new Date(Date.now() + 10 * 60_000).toISOString() });
++    queued.push(`${brand}:recommend`);
++  }
++  after(() => runWorker(2));
++  return json({ queued });
++}
+diff --git a/src/app/api/instagram/webhooks/route.ts b/src/app/api/instagram/webhooks/route.ts
+new file mode 100644
+index 0000000..47b8321
+--- /dev/null
++++ b/src/app/api/instagram/webhooks/route.ts
+@@ -0,0 +1,42 @@
++import { createHmac, timingSafeEqual } from "node:crypto";
++import { adminClient } from "@/lib/supabase/admin";
++import { fail, json } from "@/lib/http";
++
++export const dynamic = "force-dynamic";
++const brandFor = (igUserId: string) => ["ttc", "cto"].find((b) => process.env[`META_${b.toUpperCase()}_IG_USER_ID`] === igUserId);
++
++/** Meta's verification handshake when subscribing the webhook. */
++export async function GET(req: Request) {
++  const u = new URL(req.url);
++  const token = process.env.META_WEBHOOK_VERIFY_TOKEN;
++  if (token && u.searchParams.get("hub.mode") === "subscribe" && u.searchParams.get("hub.verify_token") === token) {
++    return new Response(u.searchParams.get("hub.challenge") ?? "", { status: 200 });
++  }
++  return fail("Forbidden", 403);
++}
++
++/** Caption and comment @mentions. Meta doesn't store these, so each is queued for the next discovery run. */
++export async function POST(req: Request) {
++  const raw = await req.text();
++  const secret = process.env.META_APP_SECRET;
++  const sig = req.headers.get("x-hub-signature-256") ?? "";
++  if (!secret) return fail("Not configured", 503);
++  const want = "sha256=" + createHmac("sha256", secret).update(raw, "utf8").digest("hex");
++  if (sig.length !== want.length || !timingSafeEqual(Buffer.from(sig), Buffer.from(want))) return fail("Bad signature", 401);
++  const body = JSON.parse(raw) as { entry?: { id: string; changes?: { field: string; value?: { media_id?: string; comment_id?: string } }[] }[] };
++  const db = adminClient();
++  const brands = new Set<string>();
++  for (const e of body.entry ?? []) {
++    const brand = brandFor(e.id);
++    if (!brand) continue;
++    for (const ch of e.changes ?? []) {
++      if (ch.field !== "mentions" || !ch.value?.media_id) continue;
++      await db.from("ig_mention_events").upsert({ brand_id: brand, media_id: ch.value.media_id, comment_id: ch.value.comment_id ?? null },
++        { onConflict: "brand_id,media_id,comment_id", ignoreDuplicates: true });
++      brands.add(brand);
++    }
++  }
++  for (const b of brands) await db.rpc("enqueue_job", { p_type: "ugc.discover", p_brand: b, p_payload: { reason: "mention" },
++    p_dedupe: `ugc-discover-${b}-webhook`, p_run_after: new Date(Date.now() + 5 * 60_000).toISOString() });
++  return json({ ok: true });
++}
+diff --git a/src/app/api/ugc/[brand]/discover/route.ts b/src/app/api/ugc/[brand]/discover/route.ts
+new file mode 100644
+index 0000000..3168aef
+--- /dev/null
++++ b/src/app/api/ugc/[brand]/discover/route.ts
+@@ -0,0 +1,17 @@
++import { after } from "next/server";
++import { userClient } from "@/lib/supabase/server";
++import { runWorker } from "@/lib/jobs/worker";
++import { dbError, fail, json } from "@/lib/http";
++
++export const maxDuration = 300;
++export const dynamic = "force-dynamic";
++
++/** Checks Instagram for new tagged posts and queued mentions (Approvers and above, checked in the database). */
++export async function POST(_req: Request, ctx: { params: Promise<{ brand: string }> }) {
++  const { brand } = await ctx.params;
++  const sb = await userClient();
++  const { data: jobId, error } = await sb.rpc("enqueue_job", { p_type: "ugc.discover", p_brand: brand, p_payload: {}, p_dedupe: `ugc-discover-${brand}-manual` });
++  if (error) return fail(dbError(error), 403);
++  after(() => runWorker(1));
++  return json({ jobId });
++}
+diff --git a/src/app/api/ugc/[brand]/import/route.ts b/src/app/api/ugc/[brand]/import/route.ts
+new file mode 100644
+index 0000000..856c8df
+--- /dev/null
++++ b/src/app/api/ugc/[brand]/import/route.ts
+@@ -0,0 +1,23 @@
++import { z } from "zod";
++import { userClient } from "@/lib/supabase/server";
++import { parseLaterImport } from "@/lib/ugc/normalize";
++import { dbError, fail, json } from "@/lib/http";
++
++export const dynamic = "force-dynamic";
++const Body = z.object({ text: z.string().min(1).max(200_000), source: z.enum(["later_import", "manual"]).default("later_import") });
++
++/** Adds posts collected in Later (or found by hand) from pasted links or a CSV. Stores links and details only;
++ *  existing posts are skipped, so importing the same list twice is harmless. */
++export async function POST(req: Request, ctx: { params: Promise<{ brand: string }> }) {
++  const { brand } = await ctx.params;
++  const body = Body.safeParse(await req.json().catch(() => null));
++  if (!body.success) return fail("Paste Instagram post links or a CSV");
++  const { rows, errors } = parseLaterImport(body.data.text);
++  if (!rows.length) return fail(errors[0] ?? "No Instagram post links found");
++  const sb = await userClient();
++  const { data, error } = await sb.from("ugc_items").upsert(rows.slice(0, 500).map((r) => ({ brand_id: brand, fingerprint: r.fingerprint, sources: [body.data.source],
++    permalink: r.permalink, creator_handle: r.creator_handle, caption: r.caption, posted_at: r.posted_at, permission_evidence: "" })),
++    { onConflict: "brand_id,fingerprint", ignoreDuplicates: true }).select("id");
++  if (error) return fail(dbError(error), 403);
++  return json({ added: data?.length ?? 0, alreadyHad: rows.length - (data?.length ?? 0), errors: errors.slice(0, 20) });
++}
+diff --git a/src/app/api/ugc/[brand]/recommend/route.ts b/src/app/api/ugc/[brand]/recommend/route.ts
+new file mode 100644
+index 0000000..a6bf44b
+--- /dev/null
++++ b/src/app/api/ugc/[brand]/recommend/route.ts
+@@ -0,0 +1,23 @@
++import { after } from "next/server";
++import { z } from "zod";
++import { userClient } from "@/lib/supabase/server";
++import { runWorker } from "@/lib/jobs/worker";
++import { dbError, fail, json } from "@/lib/http";
++
++export const maxDuration = 300;
++export const dynamic = "force-dynamic";
++const Body = z.object({ ids: z.array(z.string().max(64)).max(20).optional() }).optional();
++
++/** Runs the recommendation agent on the strongest new posts, or on the posts given (Generate caption). */
++export async function POST(req: Request, ctx: { params: Promise<{ brand: string }> }) {
++  const { brand } = await ctx.params;
++  const body = Body.safeParse(await req.json().catch(() => ({})));
++  if (!body.success) return fail("Invalid request");
++  const sb = await userClient();
++  const ids = body.data?.ids;
++  const { data: jobId, error } = await sb.rpc("enqueue_job", { p_type: "ugc.recommend", p_brand: brand, p_payload: { ids: ids ?? null },
++    p_dedupe: ids?.length ? null : `ugc-recommend-${brand}-manual` });
++  if (error) return fail(dbError(error), 403);
++  after(() => runWorker(1));
++  return json({ jobId });
++}
+diff --git a/src/app/api/ugc/item/[id]/draft/route.ts b/src/app/api/ugc/item/[id]/draft/route.ts
+new file mode 100644
+index 0000000..a376a51
+--- /dev/null
++++ b/src/app/api/ugc/item/[id]/draft/route.ts
+@@ -0,0 +1,12 @@
++import { userClient } from "@/lib/supabase/server";
++import { draftFromUgc } from "@/lib/ugc/draft";
++import { fail, json } from "@/lib/http";
++
++export const dynamic = "force-dynamic";
++
++/** Add to Calendar from a UGC recommendation (creates a draft for review only). */
++export async function POST(_req: Request, ctx: { params: Promise<{ id: string }> }) {
++  const { id } = await ctx.params;
++  const r = await draftFromUgc(await userClient(), id);
++  return r.error ? fail(r.error, r.status ?? 400) : json(r);
++}
+diff --git a/src/app/api/ugc/item/[id]/save/route.ts b/src/app/api/ugc/item/[id]/save/route.ts
+new file mode 100644
+index 0000000..10b00a8
+--- /dev/null
++++ b/src/app/api/ugc/item/[id]/save/route.ts
+@@ -0,0 +1,44 @@
++import { randomUUID } from "node:crypto";
++import { userClient } from "@/lib/supabase/server";
++import { adminClient } from "@/lib/supabase/admin";
++import { fail, json } from "@/lib/http";
++
++export const maxDuration = 60;
++export const dynamic = "force-dynamic";
++const META_CDN = /(^|\.)(cdninstagram\.com|fbcdn\.net)$/i;
++
++/** Save to Content Library: copies the creator's image into private storage ONLY after permission is granted for
++ *  social use. The database refuses the copy otherwise. The saved image still needs normal image approval. */
++export async function POST(_req: Request, ctx: { params: Promise<{ id: string }> }) {
++  const { id } = await ctx.params;
++  const sb = await userClient();
++  const { data: { user } } = await sb.auth.getUser();
++  if (!user) return fail("Sign in first", 401);
++  const { data: u } = await sb.from("ugc_items").select("id,brand_id,preview_url,creator_handle,asset_id,product_matches,media_type").eq("id", id).maybeSingle();
++  if (!u) return fail("Not found", 404);
++  const { data: canEdit } = await sb.rpc("has_role", { p_brand: u.brand_id, p_min: "contributor" });
++  if (!canEdit) return fail("Contributors and above can save media", 403);
++  const { data: ok } = await sb.rpc("ugc_permission_ok", { p_ugc: id });
++  if (!ok) return fail("Record the creator's permission (including social use) before saving their media", 403);
++  if (u.asset_id) return json({ assetId: u.asset_id, already: true });
++  if (!u.preview_url) return fail("No downloadable media from Instagram for this post (videos with licensed audio aren't provided). Ask the creator to send the file and upload it in the media library.", 409);
++  const src = new URL(u.preview_url);
++  if (src.protocol !== "https:" || !META_CDN.test(src.hostname)) return fail("Unexpected media host", 400);
++  const res = await fetch(src, { cache: "no-store" });
++  if (!res.ok) return fail("The Instagram preview link has expired. Run 'Check for new content' to refresh it, then try again.", 409);
++  const type = res.headers.get("content-type") ?? "image/jpeg";
++  if (!/^image\/|^video\//.test(type)) return fail("Unexpected media type", 400);
++  const buf = Buffer.from(await res.arrayBuffer());
++  if (buf.length > 25 * 1024 * 1024) return fail("File too large", 413);
++  const admin = adminClient();
++  const ext = type.includes("png") ? "png" : type.startsWith("video/") ? "mp4" : "jpg";
++  const path = `${u.brand_id}/ugc-${id}-${randomUUID().slice(0, 8)}.${ext}`;
++  const up = await admin.storage.from("media").upload(path, buf, { contentType: type, upsert: false });
++  if (up.error) return fail(`Upload failed: ${up.error.message}`, 500);
++  const { data: asset, error } = await admin.from("assets").insert({ brand_id: u.brand_id, storage_path: path, file_name: `@${u.creator_handle} ${id}.${ext}`,
++    content_type: type, ugc_id: id, product_id: u.product_matches?.[0] ?? null, uploaded_by: user.id }).select("id").single();
++  if (error) { await admin.storage.from("media").remove([path]); return fail(error.message, 403); }
++  await admin.from("ugc_items").update({ asset_id: asset.id }).eq("id", id);
++  await admin.rpc("log_event", { p_brand: u.brand_id, p_action: "UGC saved to library", p_detail: `@${u.creator_handle} (permission on file)`, p_agent: "ugc-discovery" });
++  return json({ assetId: asset.id });
++}
+diff --git a/src/lib/content/constants.ts b/src/lib/content/constants.ts
+index 8236ddc..a38e2ae 100644
+--- a/src/lib/content/constants.ts
++++ b/src/lib/content/constants.ts
+@@ -1,5 +1,6 @@
+ export const SERIES = ["Inspiration", "Tile of the Week", "Product Feature", "Save This Space", "Perfect Match", "Tile School with Wade",
+-  "Behind the Scenes", "Team Content", "Customer Projects", "Product Launches", "Campaigns", "Seasonal Inspiration"] as const;
++  "Behind the Scenes", "Team Content", "Customer Projects", "Product Launches", "Campaigns", "Seasonal Inspiration",
++  "Builder and Designer Features", "Before and After"] as const;
+ export const FORMATS: Record<string, string[]> = {
+   Instagram: ["Single image", "Carousel", "Reel", "Story"], Facebook: ["Single image", "Carousel", "Reel", "Story"],
+   Pinterest: ["Pin"], LinkedIn: ["Single image", "Carousel", "Text post"], TikTok: ["Reel"], Email: ["Email"],
+diff --git a/src/lib/env.ts b/src/lib/env.ts
+index a1996df..e99de34 100644
+--- a/src/lib/env.ts
++++ b/src/lib/env.ts
+@@ -41,6 +41,9 @@ export function envStatus(): Record<string, boolean> {
+     cronSecret: has("CRON_SECRET"),
+     shopifyTtc: has("SHOPIFY_TTC_SHOP") && has("SHOPIFY_TTC_CLIENT_ID") && has("SHOPIFY_TTC_CLIENT_SECRET"),
+     shopifyCto: has("SHOPIFY_CTO_SHOP") && has("SHOPIFY_CTO_CLIENT_ID") && has("SHOPIFY_CTO_CLIENT_SECRET"),
++    instagramTtc: has("META_TTC_IG_USER_ID") && has("META_TTC_ACCESS_TOKEN"),
++    instagramCto: has("META_CTO_IG_USER_ID") && has("META_CTO_ACCESS_TOKEN"),
++    instagramWebhook: has("META_APP_SECRET") && has("META_WEBHOOK_VERIFY_TOKEN"),
+   };
+ }
+ 
+diff --git a/src/lib/instagram/client.ts b/src/lib/instagram/client.ts
+new file mode 100644
+index 0000000..50b893a
+--- /dev/null
++++ b/src/lib/instagram/client.ts
+@@ -0,0 +1,37 @@
++import "server-only";
++
++// Official Instagram API (Graph API, "Instagram API with Facebook Login"). One Instagram professional account per
++// brand, each with its own long-lived system-user token in server environment variables. Read-only use.
++export type IgCreds = { igUserId: string; token: string; version: string };
++export function igCreds(brand: string): IgCreds {
++  const key = brand.toUpperCase().replace(/[^A-Z0-9]/g, "_");
++  const igUserId = process.env[`META_${key}_IG_USER_ID`], token = process.env[`META_${key}_ACCESS_TOKEN`];
++  if (!igUserId || !token) throw new Error(`Instagram is not connected for brand ${brand}`);
++  return { igUserId, token, version: process.env.META_GRAPH_VERSION ?? "v25.0" };
++}
++export const igConfigured = (brand: string) => {
++  const key = brand.toUpperCase();
++  return Boolean(process.env[`META_${key}_IG_USER_ID`] && process.env[`META_${key}_ACCESS_TOKEN`]);
++};
++
++export type IgMedia = { id: string; caption?: string; media_type?: string; media_url?: string; thumbnail_url?: string; permalink?: string;
++  timestamp?: string; username?: string; children?: { data: { media_url?: string; media_type?: string; thumbnail_url?: string }[] } };
++export const MEDIA_FIELDS = "id,caption,media_type,media_url,thumbnail_url,permalink,timestamp,username,children{media_type,media_url,thumbnail_url}";
++
++export type GraphGet = <T>(path: string, params: Record<string, string>) => Promise<T>;
++export function graphFor(creds: IgCreds): GraphGet {
++  return async <T>(path: string, params: Record<string, string>): Promise<T> => {
++    const url = new URL(`https://graph.facebook.com/${creds.version}/${path}`);
++    Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, v));
++    for (let attempt = 1; attempt <= 4; attempt++) {
++      const res = await fetch(url, { headers: { Authorization: `Bearer ${creds.token}` }, cache: "no-store" });
++      const body = (await res.json().catch(() => ({}))) as { error?: { message: string; code?: number; is_transient?: boolean } } & T;
++      if (res.ok && !body.error) return body;
++      const e = body.error;
++      if (res.status >= 500 || e?.is_transient || e?.code === 4 || e?.code === 17 || e?.code === 32) { await new Promise((r) => setTimeout(r, 1500 * 2 ** attempt)); continue; }
++      if (e?.code === 190) throw new Error("The Instagram access token has expired or was revoked; create a new one in Meta Business settings");
++      throw new Error(`Instagram API: ${e?.message ?? `HTTP ${res.status}`}`);
++    }
++    throw new Error("Instagram API kept rate-limiting the request; it will be retried later");
++  };
++}
+diff --git a/src/lib/jobs/worker.ts b/src/lib/jobs/worker.ts
+index ca92087..eabb7d5 100644
+--- a/src/lib/jobs/worker.ts
++++ b/src/lib/jobs/worker.ts
+@@ -6,6 +6,9 @@ import { runPlanner } from "@/lib/ai/planner";
+ import { supabaseStore } from "@/lib/ai/store";
+ import { model } from "@/lib/ai/anthropic";
+ import { env } from "@/lib/env";
++import { discoverBrand } from "@/lib/ugc/discover";
++import { recommendUgc, type RecModel } from "@/lib/ugc/recommender";
++import { ugcStore } from "@/lib/ugc/store";
+ 
+ type Job = { id: number; type: string; brand_id: string | null; payload: Record<string, unknown>; attempts: number };
+ 
+@@ -24,6 +27,13 @@ async function handle(job: Job): Promise<unknown> {
+     await db.rpc("log_event", { p_brand: job.brand_id, p_action: "AI plan finished", p_detail: `${result.createdIds.length} drafts saved, ${result.rejected.length} rejected by fact checks`, p_agent: "planner" });
+     return result;
+   }
++  if (job.type === "ugc.discover") return discoverBrand(job.brand_id, { db });
++  if (job.type === "ugc.recommend") {
++    const ids = (job.payload as { ids?: string[] | null }).ids ?? undefined;
++    const recs = await recommendUgc({ store: await ugcStore(db, job.brand_id), model: model() as unknown as RecModel, modelName: env().ANTHROPIC_MODEL, ids, limit: ids?.length ?? 12 });
++    await db.rpc("log_event", { p_brand: job.brand_id, p_action: "UGC recommendations", p_detail: `${recs.filter((r) => r.suggestion.fit).length} recommended of ${recs.length} reviewed`, p_agent: "ugc-recommender" });
++    return { reviewed: recs.length, recommended: recs.filter((r) => r.suggestion.fit).length, ids: recs.map((r) => r.id) };
++  }
+   throw new Error(`No handler for ${job.type}`);
+ }
+ 
+diff --git a/src/lib/ugc/discover.ts b/src/lib/ugc/discover.ts
+new file mode 100644
+index 0000000..981e5b6
+--- /dev/null
++++ b/src/lib/ugc/discover.ts
+@@ -0,0 +1,81 @@
++import "server-only";
++import type { SupabaseClient } from "@supabase/supabase-js";
++import { MEDIA_FIELDS, graphFor, igCreds, type GraphGet, type IgMedia } from "@/lib/instagram/client";
++import { canonicalPermalink, captionHash, fingerprintFor, normalizeHandle } from "./normalize";
++import { scoreUgc, type CatalogueEntry } from "./score";
++
++type Existing = { id: string; fingerprint: string; sources: string[]; caption: string; caption_hash: string | null; creator_handle: string };
++
++/** Finds new tagged posts and processes queued caption @mentions for one brand's own Instagram account.
++ *  Stores metadata and a short-lived preview link only; no third-party media is downloaded. */
++export async function discoverBrand(brand: string, deps: { db: SupabaseClient; graph?: GraphGet; igUserId?: string; maxPages?: number }) {
++  const db = deps.db;
++  const creds = deps.graph ? null : igCreds(brand);
++  const graph = deps.graph ?? graphFor(creds!);
++  const igUserId = deps.igUserId ?? creds!.igUserId;
++  const me = await graph<{ id: string; username: string }>(igUserId, { fields: "id,username" });
++  const conn = await db.from("instagram_connections").upsert({ brand_id: brand, ig_user_id: me.id, username: me.username, status: "connected", last_error: null, updated_at: new Date().toISOString() }, { onConflict: "brand_id" });
++  if (conn.error) throw new Error(`Could not save the Instagram connection: ${conn.error.message}`);
++
++  const { data: prods } = await db.from("products").select("id,title,tags,kind,inventory").eq("brand_id", brand).eq("active", true).limit(5000);
++  const catalogue = (prods ?? []) as CatalogueEntry[];
++  const found: { m: IgMedia; source: "instagram_tag" | "instagram_mention" }[] = [];
++
++  // Tagged posts: listable, newest first.
++  let after: string | undefined;
++  for (let page = 0; page < (deps.maxPages ?? 4); page++) {
++    const r = await graph<{ data: IgMedia[]; paging?: { cursors?: { after?: string }; next?: string } }>(`${igUserId}/tags`, { fields: MEDIA_FIELDS, limit: "50", ...(after ? { after } : {}) });
++    r.data.forEach((m) => found.push({ m, source: "instagram_tag" }));
++    after = r.paging?.next ? r.paging.cursors?.after : undefined;
++    if (!after) break;
++  }
++  // Caption @mentions: only the ones Meta sent to our webhook.
++  const { data: events } = await db.from("ig_mention_events").select("id,media_id").eq("brand_id", brand).is("processed_at", null).limit(200);
++  for (const ev of events ?? []) {
++    try {
++      const r = await graph<{ mentioned_media?: IgMedia }>(igUserId, { fields: `mentioned_media.media_id(${ev.media_id}){${MEDIA_FIELDS}}` });
++      if (r.mentioned_media) found.push({ m: r.mentioned_media, source: "instagram_mention" });
++      await db.from("ig_mention_events").update({ processed_at: new Date().toISOString(), error: null }).eq("id", ev.id);
++    } catch (e) {
++      await db.from("ig_mention_events").update({ error: e instanceof Error ? e.message.slice(0, 300) : "error" }).eq("id", ev.id);
++    }
++  }
++
++  const fps = [...new Set(found.map(({ m }) => fingerprintFor({ permalink: m.permalink, externalId: m.id })).filter(Boolean))] as string[];
++  const { data: rows } = fps.length ? await db.from("ugc_items").select("id,fingerprint,sources,caption,caption_hash,creator_handle").eq("brand_id", brand).in("fingerprint", fps) : { data: [] };
++  const existing = new Map(((rows ?? []) as Existing[]).map((r) => [r.fingerprint, r]));
++  let added = 0, refreshed = 0, duplicates = 0;
++  const now = new Date().toISOString();
++  for (const { m, source } of found) {
++    const fp = fingerprintFor({ permalink: m.permalink, externalId: m.id });
++    if (!fp) continue;
++    const preview = m.media_type === "VIDEO" ? m.thumbnail_url ?? null : m.media_url ?? m.children?.data?.find((c) => c.media_url)?.media_url ?? m.thumbnail_url ?? null;
++    const prior = existing.get(fp);
++    if (prior) {
++      const sources = [...new Set([...prior.sources, source])];
++      await db.from("ugc_items").update({ external_id: m.id, preview_url: preview, preview_refreshed_at: now, sources,
++        ...(prior.caption ? {} : { caption: m.caption ?? "" }), ...(prior.creator_handle ? {} : { creator_handle: normalizeHandle(m.username ?? "") }) }).eq("id", prior.id);
++      prior.sources = sources; refreshed++;
++      continue;
++    }
++    const handle = normalizeHandle(m.username ?? "");
++    const hash = captionHash(handle, m.caption ?? "");
++    let duplicateOf: string | null = null;
++    if (hash) {
++      const { data: twin } = await db.from("ugc_items").select("id").eq("brand_id", brand).eq("caption_hash", hash).limit(1).maybeSingle();
++      duplicateOf = twin?.id ?? null;
++    }
++    const s = scoreUgc({ caption: m.caption ?? "", creator_handle: handle, media_type: m.media_type ?? "", preview_url: preview, posted_at: m.timestamp ?? null, sources: [source] }, catalogue);
++    const ins = await db.from("ugc_items").insert({ brand_id: brand, fingerprint: fp, sources: [source], external_id: m.id,
++      permalink: m.permalink ? canonicalPermalink(m.permalink) : "", creator_handle: handle, caption: m.caption ?? "", caption_hash: hash,
++      media_type: m.media_type ?? "", preview_url: preview, preview_refreshed_at: now, posted_at: m.timestamp ?? null,
++      relevance_score: s.score, relevance_reasons: s.reasons, product_matches: s.productMatches, duplicate_of: duplicateOf,
++      status: duplicateOf ? "dismissed" : "new" }).select("id").single();
++    if (ins.error) { if (ins.error.code === "23505") continue; throw new Error(`Could not save UGC: ${ins.error.message}`); }
++    existing.set(fp, { id: ins.data.id, fingerprint: fp, sources: [source], caption: m.caption ?? "", caption_hash: hash, creator_handle: handle });
++    if (duplicateOf) duplicates++; else added++;
++  }
++  await db.from("instagram_connections").update({ last_tags_sync_at: now, ...(events?.length ? { last_mention_at: now } : {}) }).eq("brand_id", brand);
++  await db.rpc("log_event", { p_brand: brand, p_action: "UGC discovery", p_detail: `${added} new, ${refreshed} refreshed, ${duplicates} duplicates skipped`, p_agent: "ugc-discovery" });
++  return { added, refreshed, duplicates, mentionsProcessed: events?.length ?? 0 };
++}
+diff --git a/src/lib/ugc/draft.ts b/src/lib/ugc/draft.ts
+new file mode 100644
+index 0000000..f822f76
+--- /dev/null
++++ b/src/lib/ugc/draft.ts
+@@ -0,0 +1,26 @@
++import type { SupabaseClient } from "@supabase/supabase-js";
++import { brisbaneToIso } from "@/lib/content/constants";
++
++type Suggestion = { fit?: boolean; series?: string; format?: string; caption?: string; credit?: string; productIds?: string[]; suggestedDate?: string;
++  opportunity?: string; why?: string; storyIdea?: string; productNotes?: string };
++
++/** Add to Calendar: creates a draft for review from a UGC recommendation, as the signed-in user. Nothing is
++ *  approved or scheduled, and the database refuses approval until the creator's permission is on file. */
++export async function draftFromUgc(sb: SupabaseClient, id: string): Promise<{ contentId?: string; already?: boolean; error?: string; status?: number }> {
++  const { data: u } = await sb.from("ugc_items").select("id,brand_id,creator_handle,permalink,suggestion,asset_id,permission_status,attribution").eq("id", id).maybeSingle();
++  if (!u) return { error: "Not found", status: 404 };
++  const s = (u.suggestion ?? {}) as Suggestion;
++  if (!s.fit || !s.caption || !s.suggestedDate) return { error: "Generate a caption first", status: 409 };
++  const { data: existing } = await sb.from("content_items").select("id").eq("ugc_id", id).eq("archived", false).limit(1).maybeSingle();
++  if (existing) return { contentId: existing.id, already: true };
++  const credit = u.permission_status === "Permission granted" && u.attribution ? u.attribution : s.credit ?? `📷 @${u.creator_handle}`;
++  const brief = [`Concept: ${s.opportunity ?? "Customer content"}. ${s.why ?? ""}`.trim(), `Uses @${u.creator_handle}'s post: ${u.permalink}`,
++    `Creator permission: ${u.permission_status}. Credit as "${credit}".`, s.productNotes ? `Product match notes (confirm before approving): ${s.productNotes}` : "",
++    s.storyIdea ? `Story frames: ${s.storyIdea}` : "", "Use the creator's original image only; don't crop out or alter their work."].filter(Boolean).join("\n");
++  const { data, error } = await sb.from("content_items").insert({ brand_id: u.brand_id, ugc_id: id, title: `${s.series ?? "Customer Projects"}: @${u.creator_handle}`,
++    series: s.series ?? "Customer Projects", channel: "Instagram", format: s.format ?? "Single image",
++    scheduled_at: brisbaneToIso(`${s.suggestedDate}T18:00`), caption: `${s.caption}\n\n${credit}`, hashtags: [], product_ids: s.productIds ?? [],
++    asset_ids: u.asset_id ? [u.asset_id] : [], brief, status: "Needs Review" }).select("id").single();
++  if (error) return { error: error.message, status: 403 };
++  return { contentId: data.id };
++}
+diff --git a/src/lib/ugc/normalize.ts b/src/lib/ugc/normalize.ts
+new file mode 100644
+index 0000000..16ab2a7
+--- /dev/null
++++ b/src/lib/ugc/normalize.ts
+@@ -0,0 +1,61 @@
++// Duplicate detection and manual-import parsing for UGC. No network access; safe to unit test.
++
++/** Instagram shortcode from any post/reel URL form, or null. */
++export function shortcodeFromUrl(url: string): string | null {
++  const m = String(url ?? "").trim().match(/^https?:\/\/(?:www\.|m\.)?instagram\.com\/(?:[\w.]+\/)?(?:p|reel|reels|tv)\/([A-Za-z0-9_-]{5,})/i);
++  return m ? m[1] : null;
++}
++/** One stable key per post, shared by every source (tags, mentions, Later import), so a post is stored once per brand. */
++export function fingerprintFor(o: { permalink?: string | null; externalId?: string | null }): string | null {
++  const code = o.permalink ? shortcodeFromUrl(o.permalink) : null;
++  if (code) return `ig:${code}`;
++  if (o.externalId) return `id:${o.externalId}`;
++  return null;
++}
++export const canonicalPermalink = (url: string) => { const c = shortcodeFromUrl(url); return c ? `https://www.instagram.com/p/${c}/` : url.trim(); };
++export const normalizeHandle = (h: string) => String(h ?? "").trim().replace(/^@/, "").toLowerCase().replace(/[^a-z0-9._]/g, "");
++
++/** Same creator re-sharing the same caption under a new link is treated as a duplicate. */
++export function captionHash(handle: string, caption: string): string | null {
++  const text = String(caption ?? "").toLowerCase().replace(/[#@][\w.]+/g, " ").replace(/[^\p{L}\p{N}]+/gu, " ").trim();
++  if (text.length < 25) return null;
++  let h = 0x811c9dc5;
++  const s = `${normalizeHandle(handle)}|${text}`;
++  for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 0x01000193); }
++  return (h >>> 0).toString(16).padStart(8, "0");
++}
++
++export type ImportRow = { permalink: string; fingerprint: string; creator_handle: string; caption: string; posted_at: string | null; notes: string };
++/** Accepts pasted Instagram links (one per line, optionally "link @handle"), or CSV with a header row
++ *  containing url/link/permalink and optionally handle/username, caption, date, notes. */
++export function parseLaterImport(text: string): { rows: ImportRow[]; errors: string[] } {
++  const lines = String(text ?? "").split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
++  const rows: ImportRow[] = [], errors: string[] = [], seen = new Set<string>();
++  if (!lines.length) return { rows, errors: ["Nothing to import"] };
++  const splitCsv = (l: string) => { const out: string[] = []; let cur = "", q = false;
++    for (let i = 0; i < l.length; i++) { const ch = l[i];
++      if (q) { if (ch === '"' && l[i + 1] === '"') { cur += '"'; i++; } else if (ch === '"') q = false; else cur += ch; }
++      else if (ch === '"') q = true; else if (ch === ",") { out.push(cur); cur = ""; } else cur += ch; }
++    out.push(cur); return out.map((c) => c.trim()); };
++  const header = splitCsv(lines[0]).map((h) => h.toLowerCase());
++  const col = (names: string[]) => header.findIndex((h) => names.some((n) => h === n || h.includes(n)));
++  const isCsv = col(["url", "link", "permalink"]) >= 0 && !shortcodeFromUrl(lines[0]);
++  const body = isCsv ? lines.slice(1) : lines;
++  const iUrl = isCsv ? col(["url", "link", "permalink"]) : -1, iHandle = col(["handle", "username", "creator", "account"]),
++    iCap = col(["caption", "description"]), iDate = col(["date", "posted"]), iNotes = col(["note"]);
++  body.forEach((line, n) => {
++    const cells = isCsv ? splitCsv(line) : [];
++    const url = isCsv ? cells[iUrl] ?? "" : (line.match(/https?:\/\/\S+/)?.[0] ?? "");
++    const fp = fingerprintFor({ permalink: url });
++    if (!fp) { errors.push(`Line ${n + (isCsv ? 2 : 1)}: not an Instagram post link`); return; }
++    if (seen.has(fp)) return;
++    seen.add(fp);
++    const handle = isCsv && iHandle >= 0 ? cells[iHandle] : (line.match(/@([\w.]+)/)?.[1] ?? "");
++    const date = isCsv && iDate >= 0 ? cells[iDate] : "";
++    const parsed = date ? new Date(/^\d{1,2}\/\d{1,2}\/\d{4}$/.test(date) ? date.split("/").reverse().join("-") : date) : null;
++    rows.push({ permalink: canonicalPermalink(url), fingerprint: fp, creator_handle: normalizeHandle(handle ?? ""),
++      caption: isCsv && iCap >= 0 ? (cells[iCap] ?? "").slice(0, 2200) : "", posted_at: parsed && !Number.isNaN(parsed.getTime()) ? parsed.toISOString() : null,
++      notes: isCsv && iNotes >= 0 ? (cells[iNotes] ?? "").slice(0, 500) : "" });
++  });
++  return { rows, errors };
++}
+diff --git a/src/lib/ugc/recommender.ts b/src/lib/ugc/recommender.ts
+new file mode 100644
+index 0000000..f8d73f7
+--- /dev/null
++++ b/src/lib/ugc/recommender.ts
+@@ -0,0 +1,111 @@
++// UGC recommendation agent: reviews discovered posts and recommends the strongest opportunities, each with an
++// original caption, verified products and a suggested date. It writes suggestions only; people decide what is used.
++import { avoidWordHits, factIssues } from "@/lib/content/facts";
++import type { Brand, PlannerProduct } from "@/lib/ai/planner";
++import { OPPORTUNITY_TO_SERIES, UGC_OPPORTUNITIES, type Opportunity } from "./score";
++
++export type UgcCandidate = { id: string; creator_handle: string; caption: string; media_type: string; preview_url: string | null; posted_at: string | null;
++  permalink: string; relevance_score: number | null; relevance_reasons: string[]; product_matches: string[]; permission_status: string; attribution: string; sources: string[] };
++export type UgcSuggestion = { fit: boolean; opportunity?: Opportunity; series?: string; format?: string; strength?: number; why: string; caption?: string;
++  credit?: string; productIds?: string[]; productNotes?: string; suggestedDate?: string; storyIdea?: string; problems: string[]; model: string; at: string };
++export interface RecommenderStore {
++  brand: Brand;
++  candidates(o: { limit: number; ids?: string[] }): Promise<UgcCandidate[]>;
++  productsFor(c: UgcCandidate): Promise<PlannerProduct[]>;
++  catalogueTitles(): Promise<{ id: string; title: string }[]>;
++  takenDates(from: string, to: string): Promise<string[]>;
++  save(id: string, s: UgcSuggestion): Promise<void>;
++}
++type Block = { type: string; name?: string; input?: unknown };
++export interface RecModel { create(p: Record<string, unknown>): Promise<{ content: Block[] }> }
++
++const ymd = (d: Date) => new Date(d.getTime() + 10 * 3600_000).toISOString().slice(0, 10); // Brisbane date
++const addDays = (s: string, n: number) => { const d = new Date(`${s}T00:00:00Z`); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); };
++const weekday = (s: string) => new Date(`${s}T00:00:00Z`).getUTCDay();
++
++/** Picks a free date: the suggested one if valid, otherwise the next free Monday/Wednesday/Friday
++ *  (or the opportunity's own weekday, e.g. Monday for Monday Inspiration). */
++export function chooseDate(suggested: string | undefined, opp: Opportunity, now: Date, taken: Set<string>): string {
++  const today = ymd(now), first = addDays(today, 1), last = addDays(today, 60);
++  const wanted = OPPORTUNITY_TO_SERIES[opp].weekday;
++  const ok = (d: string) => d >= first && d <= last && !taken.has(d) && (wanted == null || weekday(d) === wanted);
++  if (suggested && /^\d{4}-\d{2}-\d{2}$/.test(suggested) && ok(suggested)) return suggested;
++  for (let d = addDays(today, 2); d <= last; d = addDays(d, 1)) {
++    if (taken.has(d)) continue;
++    if (wanted != null ? weekday(d) === wanted : [1, 3, 5].includes(weekday(d))) return d;
++  }
++  return addDays(today, 7);
++}
++
++const TOOL = {
++  name: "record_recommendation",
++  description: "Record your recommendation for this creator post.",
++  input_schema: { type: "object", required: ["fit", "why"], properties: {
++    fit: { type: "boolean", description: "Is this a strong, on-brand opportunity worth sharing?" },
++    opportunity: { type: "string", enum: [...UGC_OPPORTUNITIES] },
++    strength: { type: "integer", minimum: 1, maximum: 5 },
++    why: { type: "string", description: "One or two sentences on why (or why not)." },
++    caption: { type: "string", description: "An original caption in the brand's voice. Do not copy the creator's caption, do not include their handle or a credit line (added automatically), and do not state any product fact that isn't in the verified product list." },
++    productIds: { type: "array", items: { type: "string" }, description: "Only ids from the verified product list that this post genuinely appears to feature." },
++    productNotes: { type: "string", description: "What makes you think these products match, and how sure you are." },
++    suggestedDate: { type: "string", description: "YYYY-MM-DD" },
++    storyIdea: { type: "string", description: "For Instagram Stories: the frames and sticker idea." } } },
++};
++
++export async function recommendUgc(args: { store: RecommenderStore; model: RecModel; modelName: string; now?: Date; limit?: number; ids?: string[] }) {
++  const now = args.now ?? new Date();
++  const b = args.store.brand, g = b.guidelines as Record<string, string>;
++  const cands = await args.store.candidates({ limit: args.limit ?? 12, ids: args.ids });
++  const titles = await args.store.catalogueTitles();
++  const taken = new Set(await args.store.takenDates(ymd(now), addDays(ymd(now), 61)));
++  const out: { id: string; suggestion: UgcSuggestion }[] = [];
++  const system = `You review Instagram posts that customers, designers, builders and creators made featuring ${b.name}, and recommend which to share.
++Brand voice: ${g.voice ?? ""}
++Audience: ${g.audience ?? ""}
++Never use these words: ${g.avoid || "none"}. Australian English.
++Opportunity types: ${UGC_OPPORTUNITIES.join("; ")}.
++Rules: judge the image and caption honestly; mark fit false for anything off-brand, low quality, not clearly featuring tiles, or showing a competitor. Product matches are suggestions for a person to confirm: only use ids from the verified list, and say how confident you are. Never invent prices, stock, sizes or specifications. Write an original caption; never reuse the creator's words except a short quote marked as theirs.`;
++  for (const c of cands) {
++    const products = await args.store.productsFor(c);
++    const list = products.map((p) => ({ id: p.id, name: p.title, size: p.size || "not specified", finish: p.finish || "not specified", colour: p.colour || "not specified", specs: p.specs }));
++    const text = `Creator: @${c.creator_handle || "unknown"}
++Posted: ${c.posted_at ? ymd(new Date(c.posted_at)) : "unknown"}   Source: ${c.sources.join(", ")}   Media: ${c.media_type || "unknown"}
++Their caption: """${c.caption.slice(0, 1500)}"""
++Relevance signals: ${c.relevance_reasons.join("; ") || "none"}
++Verified products from ${b.name}'s Shopify catalogue (only these may be used): ${JSON.stringify(list)}
++Dates already taken on the calendar: ${[...taken].slice(0, 40).join(", ") || "none"}. Today is ${ymd(now)}.`;
++    const content: unknown[] = [{ type: "text", text }];
++    if (c.preview_url) content.unshift({ type: "image", source: { type: "url", url: c.preview_url } });
++    let input: Record<string, unknown> | null = null;
++    for (const withImage of c.preview_url ? [true, false] : [false]) {
++      try {
++        const res = await args.model.create({ model: args.modelName, max_tokens: 1500, system, tools: [TOOL], tool_choice: { type: "tool", name: TOOL.name },
++          messages: [{ role: "user", content: withImage ? content : content.filter((x) => (x as { type: string }).type === "text") }] });
++        input = (res.content.find((x) => x.type === "tool_use")?.input ?? null) as Record<string, unknown> | null;
++        if (input) break;
++      } catch (e) { if (!withImage) throw e; } // the preview link may have expired; try again from the caption alone
++    }
++    const base = { model: args.modelName, at: now.toISOString(), problems: [] as string[] };
++    if (!input || input.fit !== true) {
++      const s: UgcSuggestion = { ...base, fit: false, why: String(input?.why ?? "Not a strong fit.") };
++      await args.store.save(c.id, s); out.push({ id: c.id, suggestion: s }); continue;
++    }
++    const opp = (UGC_OPPORTUNITIES as readonly string[]).includes(String(input.opportunity)) ? (input.opportunity as Opportunity) : "Customer Projects";
++    const allowed = new Map(products.map((p) => [p.id, p]));
++    const chosen = ((input.productIds as string[] | undefined) ?? []).filter((id) => allowed.has(id));
++    const dropped = ((input.productIds as string[] | undefined) ?? []).filter((id) => !allowed.has(id));
++    const caption = String(input.caption ?? "").replace(/\n*📷.*$/s, "").trim();
++    const problems = [...factIssues(caption, chosen.map((id) => allowed.get(id)!), titles), ...avoidWordHits(caption, String(g.avoid ?? "")).map((w) => `Uses off-brand word "${w}"`)];
++    if (dropped.length) problems.push(`Ignored ${dropped.length} product suggestion(s) not in the verified catalogue`);
++    const credit = c.permission_status === "Permission granted" && c.attribution ? c.attribution : `📷 @${c.creator_handle}`;
++    const date = chooseDate(input.suggestedDate as string | undefined, opp, now, taken);
++    taken.add(date);
++    const s: UgcSuggestion = { ...base, fit: true, opportunity: opp, series: OPPORTUNITY_TO_SERIES[opp].series, format: OPPORTUNITY_TO_SERIES[opp].format,
++      strength: Math.max(1, Math.min(5, Number(input.strength) || 3)), why: String(input.why ?? ""),
++      caption: problems.some((p) => !p.startsWith("Ignored")) ? undefined : caption, credit, productIds: chosen,
++      productNotes: String(input.productNotes ?? ""), suggestedDate: date, storyIdea: input.storyIdea ? String(input.storyIdea) : undefined, problems };
++    await args.store.save(c.id, s);
++    out.push({ id: c.id, suggestion: s });
++  }
++  return out;
++}
+diff --git a/src/lib/ugc/score.ts b/src/lib/ugc/score.ts
+new file mode 100644
+index 0000000..add97b8
+--- /dev/null
++++ b/src/lib/ugc/score.ts
+@@ -0,0 +1,69 @@
++// Brand relevance scoring for discovered UGC. Deterministic and explainable; the AI agent adds judgement on top.
++
++export const UGC_OPPORTUNITIES = ["Monday Inspiration", "Save This Space", "Customer Projects", "Builder and Designer Features",
++  "Before and After", "Product Features", "Instagram Stories"] as const;
++export type Opportunity = (typeof UGC_OPPORTUNITIES)[number];
++/** Which content series and format each opportunity becomes on the calendar. */
++export const OPPORTUNITY_TO_SERIES: Record<Opportunity, { series: string; format: string; weekday?: number }> = {
++  "Monday Inspiration": { series: "Inspiration", format: "Single image", weekday: 1 },
++  "Save This Space": { series: "Save This Space", format: "Carousel" },
++  "Customer Projects": { series: "Customer Projects", format: "Single image" },
++  "Builder and Designer Features": { series: "Builder and Designer Features", format: "Carousel" },
++  "Before and After": { series: "Before and After", format: "Carousel" },
++  "Product Features": { series: "Product Feature", format: "Single image", weekday: 5 },
++  "Instagram Stories": { series: "Customer Projects", format: "Story" },
++};
++
++export type CatalogueEntry = { id: string; title: string; tags: string[]; kind: string; inventory: number | null };
++export type UgcForScoring = { caption: string; creator_handle: string; media_type: string; preview_url: string | null; posted_at: string | null; sources: string[] };
++
++const SPACE_WORDS = /\b(bathroom|ensuite|kitchen|splashback|laundry|powder room|alfresco|patio|pool|outdoor|entry|hallway|living|floor(?:ing)?|feature wall|shower|vanity|fireplace)\b/i;
++const TILE_WORDS = /\b(tiles?|tiling|tiled|porcelain|mosaic|terrazzo|travertine|zellige|subway|herringbone|grout|marble look|stone look)\b/i;
++const PROJECT_WORDS = /\b(reno|renovation|renovated|new build|build|built|project|finished|complete[d]?|transformation|makeover|our home|dream home)\b/i;
++const BEFORE_AFTER = /\b(before (?:and|&) after|before\s*\/\s*after|swipe to see|the before|from this to)\b/i;
++const TRADE_HANDLE = /(build|builder|construct|homes|reno|tiling|tiler|carpentry|projects)/i;
++const DESIGN_HANDLE = /(design|interior|studio|stylist|styling|architect|decor)/i;
++
++/** Text-based product matches only: a catalogue product is suggested when its name (or its range name) appears
++ *  in the caption. Suggestions must be confirmed by a person before use. */
++export function matchProducts(caption: string, catalogue: CatalogueEntry[], max = 5): string[] {
++  const text = ` ${caption.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ")} `;
++  const hits = new Map<string, number>();
++  for (const p of catalogue) {
++    if (p.kind === "accessory") continue;
++    const name = p.title.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
++    if (name.length >= 5 && text.includes(` ${name} `)) { hits.set(p.id, 3); continue; }
++    const range = name.split(" ").slice(0, 2).join(" ");
++    if (range.length >= 6 && text.includes(` ${range} `)) hits.set(p.id, Math.max(hits.get(p.id) ?? 0, 1));
++  }
++  return [...hits.entries()].sort((a, b) => b[1] - a[1]).slice(0, max).map(([id]) => id);
++}
++
++export function scoreUgc(u: UgcForScoring, catalogue: CatalogueEntry[], now = new Date()) {
++  const reasons: string[] = [];
++  let score = 20;
++  const cap = u.caption ?? "";
++  const products = matchProducts(cap, catalogue);
++  if (products.length) { score += 25; reasons.push(`Names ${products.length === 1 ? "a product" : products.length + " products"} from the catalogue`); }
++  if (TILE_WORDS.test(cap)) { score += 12; reasons.push("Talks about tiles"); }
++  if (SPACE_WORDS.test(cap)) { score += 10; reasons.push("Shows a finished space"); }
++  if (PROJECT_WORDS.test(cap)) { score += 8; reasons.push("Real project or renovation"); }
++  if (BEFORE_AFTER.test(cap)) { score += 6; reasons.push("Before and after"); }
++  if (TRADE_HANDLE.test(u.creator_handle)) { score += 6; reasons.push("Builder or trade account"); }
++  if (DESIGN_HANDLE.test(u.creator_handle)) { score += 6; reasons.push("Designer or stylist account"); }
++  if (u.sources.includes("instagram_tag")) { score += 5; reasons.push("Tagged the brand in the image"); }
++  if (["IMAGE", "CAROUSEL_ALBUM"].includes(u.media_type)) score += 4;
++  if (!u.preview_url) { score -= 10; reasons.push("No preview available (video with licensed audio, or added by link)"); }
++  if (u.posted_at) {
++    const days = (now.getTime() - new Date(u.posted_at).getTime()) / 86_400_000;
++    if (days <= 30) { score += 8; reasons.push("Posted in the last month"); } else if (days > 365) { score -= 12; reasons.push("Over a year old"); }
++  }
++  if (cap.trim().length < 15) { score -= 8; reasons.push("Little or no caption"); }
++  const hints: Opportunity[] = [];
++  if (BEFORE_AFTER.test(cap)) hints.push("Before and After");
++  if (TRADE_HANDLE.test(u.creator_handle) || DESIGN_HANDLE.test(u.creator_handle)) hints.push("Builder and Designer Features");
++  if (PROJECT_WORDS.test(cap)) hints.push("Customer Projects");
++  if (products.length) hints.push("Product Features");
++  if (SPACE_WORDS.test(cap)) hints.push("Save This Space");
++  return { score: Math.max(0, Math.min(100, score)), reasons, productMatches: products, hints };
++}
+diff --git a/src/lib/ugc/store.ts b/src/lib/ugc/store.ts
+new file mode 100644
+index 0000000..a8d8d85
+--- /dev/null
++++ b/src/lib/ugc/store.ts
+@@ -0,0 +1,49 @@
++import "server-only";
++import type { SupabaseClient } from "@supabase/supabase-js";
++import { supabaseStore } from "@/lib/ai/store";
++import { brisbaneToIso, isoToBrisbane } from "@/lib/content/constants";
++import type { RecommenderStore, UgcCandidate } from "./recommender";
++
++const LOOKS = ["travertine", "terrazzo", "subway", "herringbone", "marble", "timber", "hexagon", "zellige", "concrete", "mosaic", "fluted", "stone", "carrara"];
++
++/** Database access for the recommender, pinned to one brand. Skips anything used, dismissed, duplicated,
++ *  already on the calendar, or recommended in the last four weeks (unless specific posts are requested). */
++export async function ugcStore(db: SupabaseClient, brandId: string): Promise<RecommenderStore> {
++  const products = await supabaseStore(db, brandId);
++  return {
++    brand: products.brand,
++    async candidates({ limit, ids }) {
++      let q = db.from("ugc_items").select("id,creator_handle,caption,media_type,preview_url,posted_at,permalink,relevance_score,relevance_reasons,product_matches,permission_status,attribution,sources,last_recommended_at,status,duplicate_of")
++        .eq("brand_id", brandId);
++      if (ids?.length) q = q.in("id", ids);
++      const { data } = await q.order("relevance_score", { ascending: false }).limit(ids?.length ? ids.length : 400);
++      const { data: used } = await db.from("content_items").select("ugc_id").eq("brand_id", brandId).neq("archived", true);
++      const onCalendar = new Set((used ?? []).map((r: { ugc_id: string | null }) => r.ugc_id).filter(Boolean));
++      const cutoff = Date.now() - 28 * 86_400_000;
++      return ((data ?? []) as (UgcCandidate & { last_recommended_at: string | null; status: string; duplicate_of: string | null })[])
++        .filter((u) => ids?.length || (!["used", "dismissed"].includes(u.status) && !u.duplicate_of && !onCalendar.has(u.id)
++          && u.permission_status !== "Permission declined" && (!u.last_recommended_at || new Date(u.last_recommended_at).getTime() < cutoff)))
++        .slice(0, limit);
++    },
++    async productsFor(c) {
++      const byMatch = await products.productsByIds(c.product_matches);
++      const looks = LOOKS.filter((w) => c.caption.toLowerCase().includes(w)).slice(0, 2);
++      const extra = [];
++      for (const w of looks) extra.push(...(await products.searchProducts({ query: w, inStockOnly: true, limit: 8 })).products);
++      const all = new Map([...byMatch, ...extra].map((p) => [p.id, p]));
++      return [...all.values()].slice(0, 15);
++    },
++    catalogueTitles: () => products.catalogueTitles(),
++    async takenDates(from, to) {
++      const { data } = await db.from("content_items").select("scheduled_at").eq("brand_id", brandId).eq("archived", false)
++        .gte("scheduled_at", brisbaneToIso(`${from}T00:00`)!).lte("scheduled_at", brisbaneToIso(`${to}T23:59`)!);
++      return [...new Set((data ?? []).map((r: { scheduled_at: string }) => isoToBrisbane(r.scheduled_at).slice(0, 10)))];
++    },
++    async save(id, s) {
++      const { data: cur } = await db.from("ugc_items").select("times_recommended").eq("id", id).single();
++      const { error } = await db.from("ugc_items").update({ suggestion: s, last_recommended_at: new Date().toISOString(),
++        times_recommended: (cur?.times_recommended ?? 0) + 1, ...(s.fit ? { status: "recommended" } : {}) }).eq("id", id);
++      if (error) throw new Error(`Could not save recommendation: ${error.message}`);
++    },
++  };
++}
+diff --git a/src/proxy.ts b/src/proxy.ts
+index f3515d4..e0ecbae 100644
+--- a/src/proxy.ts
++++ b/src/proxy.ts
+@@ -23,4 +23,4 @@ export async function proxy(request: NextRequest) {
+   return response;
+ }
+ 
+-export const config = { matcher: ["/studio/:path*", "/api/ai/:path*", "/api/jobs/:id", "/api/shopify/:brand/sync", "/api/health", "/login"] };
++export const config = { matcher: ["/studio/:path*", "/api/ai/:path*", "/api/jobs/:id", "/api/shopify/:brand/sync", "/api/ugc/:path*", "/api/health", "/login"] };
+diff --git a/supabase/migrations/20261110000600_ugc.sql b/supabase/migrations/20261110000600_ugc.sql
+new file mode 100644
+index 0000000..d88f5b2
+--- /dev/null
++++ b/supabase/migrations/20261110000600_ugc.sql
+@@ -0,0 +1,296 @@
++-- TTC Marketing Studio · UGC Discovery
++-- Content from customers, designers, builders and creators who tag or mention a brand on Instagram, plus posts
++-- added by hand (for example from Later's Media Library). Third-party media is never stored or reused without
++-- recorded permission; the database enforces this, not just the dashboard.
++
++-- ───────── Instagram account per brand (tokens live in server environment variables, never here) ─────────
++create table public.instagram_connections (
++  brand_id          text primary key references public.brands (id) on delete cascade,
++  ig_user_id        text not null unique,
++  username          text,
++  status            text not null default 'connected' check (status in ('connected', 'error')),
++  last_tags_sync_at timestamptz,
++  last_mention_at   timestamptz,
++  last_error        text,
++  updated_at        timestamptz not null default now()
++);
++
++-- Caption @mentions only arrive by webhook (Meta does not store them), so each one is kept until processed.
++create table public.ig_mention_events (
++  id            bigserial primary key,
++  brand_id      text not null references public.brands (id) on delete cascade,
++  media_id      text not null,
++  comment_id    text,
++  received_at   timestamptz not null default now(),
++  processed_at  timestamptz,
++  error         text,
++  unique (brand_id, media_id, comment_id)
++);
++
++create type public.ugc_permission as enum
++  ('Permission not requested', 'Permission requested', 'Permission granted', 'Permission declined');
++
++create table public.ugc_items (
++  id                    text primary key default ('u-' || replace(gen_random_uuid()::text, '-', '')),
++  brand_id              text not null references public.brands (id) on delete cascade,
++  fingerprint           text not null,                    -- ig:<shortcode> or id:<media id>; one row per post per brand
++  sources               text[] not null default '{}',     -- instagram_tag, instagram_mention, later_import, manual
++  platform              text not null default 'Instagram',
++  external_id           text,                             -- Instagram media id, when known
++  permalink             text not null default '',
++  creator_handle        text not null default '',
++  caption               text not null default '',
++  caption_hash          text,                             -- spots the same post re-shared under a new link
++  media_type            text not null default '',
++  preview_url           text,                             -- short-lived link from Meta for review; the file is not stored
++  preview_refreshed_at  timestamptz,
++  posted_at             timestamptz,
++  discovered_at         timestamptz not null default now(),
++  status                text not null default 'new' check (status in ('new', 'shortlisted', 'recommended', 'used', 'dismissed')),
++  duplicate_of          text references public.ugc_items (id) on delete set null,
++  relevance_score       int check (relevance_score between 0 and 100),
++  relevance_reasons     text[] not null default '{}',
++  product_matches       text[] not null default '{}',     -- verified catalogue ids suggested from the caption
++  suggestion            jsonb,                            -- AI recommendation: series, caption, products, date, why
++  last_recommended_at   timestamptz,
++  times_recommended     int not null default 0,
++  permission_status     public.ugc_permission not null default 'Permission not requested',
++  permission_requested_at timestamptz,
++  permission_requested_via text,
++  permission_granted_at timestamptz,
++  permission_evidence   text not null default '',          -- e.g. link to the comment/DM, or a note of the reply
++  usage_scope           text[] not null default '{}',      -- organic_social, stories, paid_ads, website, email, print
++  usage_expires_on      date,
++  attribution           text not null default '',          -- credit line to publish, e.g. "📷 @handle"
++  permission_recorded_by uuid,
++  asset_id              text references public.assets (id) on delete set null,  -- set only after permission
++  created_by            uuid default auth.uid(),
++  updated_at            timestamptz not null default now(),
++  unique (brand_id, fingerprint)
++);
++create index ugc_brand_status_idx on public.ugc_items (brand_id, status, relevance_score desc);
++create index ugc_caption_hash_idx on public.ugc_items (brand_id, caption_hash);
++
++-- Every permission change, kept permanently.
++create table public.ugc_permission_events (
++  id           bigserial primary key,
++  ugc_id       text not null references public.ugc_items (id) on delete cascade,
++  brand_id     text not null references public.brands (id),
++  status       public.ugc_permission not null,
++  evidence     text not null default '',
++  usage_scope  text[] not null default '{}',
++  expires_on   date,
++  attribution  text not null default '',
++  recorded_by  uuid,
++  at           timestamptz not null default now()
++);
++create trigger ugc_permission_events_immutable before update or delete on public.ugc_permission_events
++  for each row execute function public.forbid_change();
++
++-- Images saved from UGC carry their origin; posts can point back to the UGC they use.
++alter table public.assets add column ugc_id text references public.ugc_items (id) on delete set null;
++alter table public.content_items add column ugc_id text references public.ugc_items (id) on delete set null;
++
++-- Two extra content series used by UGC recommendations.
++update public.brands set guidelines = guidelines || '{"ugc_series": ["Builder and Designer Features", "Before and After"]}'::jsonb;
++
++-- ───────── Permission checks ─────────
++create or replace function public.ugc_permission_ok(p_ugc text, p_scope text default 'organic_social')
++returns boolean language sql stable security definer set search_path = public as $$
++  select coalesce((select u.permission_status = 'Permission granted' and p_scope = any (u.usage_scope)
++                          and (u.usage_expires_on is null or u.usage_expires_on >= current_date)
++                   from public.ugc_items u where u.id = p_ugc), false);
++$$;
++
++create or replace function public.guard_ugc() returns trigger
++language plpgsql security definer set search_path = public as $$
++begin
++  new.updated_at := now();
++  new.creator_handle := lower(regexp_replace(coalesce(new.creator_handle, ''), '^@', ''));
++  if tg_op = 'UPDATE' then
++    if new.brand_id <> old.brand_id or new.fingerprint <> old.fingerprint then raise exception 'UGC cannot move between brands or posts'; end if;
++    -- Server-owned fields: only background jobs change discovery data and AI suggestions.
++    if not public.is_service() and (new.external_id is distinct from old.external_id or new.preview_url is distinct from old.preview_url
++        or new.relevance_score is distinct from old.relevance_score or new.suggestion is distinct from old.suggestion
++        or new.asset_id is distinct from old.asset_id or new.sources is distinct from old.sources) then
++      raise exception 'Discovery data is updated by the server only' using errcode = '42501';
++    end if;
++  end if;
++  if tg_op = 'INSERT' and not public.is_service() then
++    if new.permission_status <> 'Permission not requested' or new.asset_id is not null or new.suggestion is not null then
++      raise exception 'New UGC starts without permission, images or suggestions' using errcode = '42501';
++    end if;
++    if not (new.sources <@ array['later_import', 'manual']) then
++      raise exception 'Only server discovery can add Instagram API sources' using errcode = '42501';
++    end if;
++  end if;
++  if tg_op = 'UPDATE' and new.permission_status is distinct from old.permission_status then
++    if new.permission_status in ('Permission granted', 'Permission declined') and not public.is_service()
++       and not public.has_role(new.brand_id, 'approver') then
++      raise exception 'Only approvers can record a creator''s decision' using errcode = '42501';
++    end if;
++    if new.permission_status = 'Permission granted' then
++      if length(trim(new.permission_evidence)) < 5 then raise exception 'Record evidence of the creator''s permission'; end if;
++      if coalesce(array_length(new.usage_scope, 1), 0) = 0 then raise exception 'Record what the creator agreed to (usage scope)'; end if;
++      if length(trim(new.attribution)) = 0 then raise exception 'Record how the creator should be credited'; end if;
++      new.permission_granted_at := now();
++    elsif new.permission_status = 'Permission requested' then
++      new.permission_requested_at := now();
++    elsif new.permission_status = 'Permission declined' then
++      new.usage_scope := '{}';
++    end if;
++    new.permission_recorded_by := auth.uid();
++    insert into public.ugc_permission_events (ugc_id, brand_id, status, evidence, usage_scope, expires_on, attribution, recorded_by)
++    values (new.id, new.brand_id, new.permission_status, new.permission_evidence, new.usage_scope, new.usage_expires_on, new.attribution, auth.uid());
++    perform public.log_event(new.brand_id, new.permission_status::text, '@' || new.creator_handle || ' · ' || new.permalink);
++  elsif tg_op = 'UPDATE' and new.permission_status = 'Permission granted'
++        and (new.usage_scope is distinct from old.usage_scope or new.usage_expires_on is distinct from old.usage_expires_on
++             or new.permission_evidence is distinct from old.permission_evidence or new.attribution is distinct from old.attribution) then
++    if not public.is_service() and not public.has_role(new.brand_id, 'approver') then
++      raise exception 'Only approvers can change a granted permission' using errcode = '42501';
++    end if;
++    insert into public.ugc_permission_events (ugc_id, brand_id, status, evidence, usage_scope, expires_on, attribution, recorded_by)
++    values (new.id, new.brand_id, new.permission_status, new.permission_evidence, new.usage_scope, new.usage_expires_on, new.attribution, auth.uid());
++  end if;
++  if new.asset_id is not null and (tg_op = 'INSERT' or new.asset_id is distinct from old.asset_id)
++     and not (new.permission_status = 'Permission granted' and 'organic_social' = any (new.usage_scope)) then
++    raise exception 'Media can only be saved after the creator grants permission' using errcode = '42501';
++  end if;
++  return new;
++end $$;
++create trigger ugc_guard before insert or update on public.ugc_items for each row execute function public.guard_ugc();
++
++-- Saved UGC images must have permission and belong to the same brand.
++create or replace function public.guard_ugc_asset() returns trigger
++language plpgsql security definer set search_path = public as $$
++begin
++  if new.ugc_id is not null then
++    if not exists (select 1 from public.ugc_items u where u.id = new.ugc_id and u.brand_id = new.brand_id) then
++      raise exception 'UGC must belong to brand %', new.brand_id using errcode = '23514';
++    end if;
++    if not public.ugc_permission_ok(new.ugc_id) then
++      raise exception 'Media can only be saved after the creator grants permission' using errcode = '42501';
++    end if;
++  end if;
++  return new;
++end $$;
++create trigger assets_ugc_guard before insert or update of ugc_id on public.assets for each row execute function public.guard_ugc_asset();
++
++create or replace function public.guard_content_ugc() returns trigger
++language plpgsql security definer set search_path = public as $$
++begin
++  if new.ugc_id is not null and not exists (select 1 from public.ugc_items u where u.id = new.ugc_id and u.brand_id = new.brand_id) then
++    raise exception 'UGC must belong to brand %', new.brand_id using errcode = '23514';
++  end if;
++  return new;
++end $$;
++create trigger content_ugc_link before insert or update of ugc_id, brand_id on public.content_items
++  for each row execute function public.guard_content_ugc();
++
++-- ───────── Approval and scheduling refuse UGC without current permission ─────────
++create or replace function public.approve_content(p_content text, p_client_fingerprint text default null)
++returns text language plpgsql security definer set search_path = public as $$
++declare c public.content_items; v_id text;
++begin
++  select * into c from public.content_items where id = p_content for update;
++  if not found then raise exception 'Content not found'; end if;
++  if not public.has_role(c.brand_id, 'approver') then raise exception 'Only approvers can approve' using errcode = '42501'; end if;
++  if c.status <> 'Needs Review' then raise exception 'Only content in review can be approved'; end if;
++  if c.scheduled_at is null or c.caption = '' then raise exception 'Content needs a date and caption'; end if;
++  if exists (select 1 from unnest(c.asset_ids) aid join public.assets a on a.id = aid where not a.approved) then
++    raise exception 'Uses imagery that is not approved for final use';
++  end if;
++  if c.ugc_id is not null and not public.ugc_permission_ok(c.ugc_id) then
++    raise exception 'Uses creator content without current permission for social use';
++  end if;
++  v_id := 'ap-' || replace(gen_random_uuid()::text, '-', '');
++  insert into public.approvals (id, content_id, brand_id, fingerprint, client_fingerprint, snapshot, approved_by)
++  values (v_id, c.id, c.brand_id, public.content_fingerprint(c), p_client_fingerprint, to_jsonb(c), auth.uid());
++  perform set_config('app.via_workflow', 'on', true);
++  update public.content_items set status = 'Approved', approval_id = v_id, client_fingerprint = p_client_fingerprint, review_note = '' where id = c.id;
++  perform set_config('app.via_workflow', 'off', true);
++  return v_id;
++end $$;
++
++create or replace function public.mark_scheduled_manual(p_content text, p_platform text default 'later-manual')
++returns bigint language plpgsql security definer set search_path = public as $$
++declare c public.content_items; v_job bigint;
++begin
++  if (select paused from public.settings) then raise exception 'Publishing is paused'; end if;
++  select * into c from public.content_items where id = p_content for update;
++  if not public.can_publish(c.brand_id) then raise exception 'You do not have publishing permission' using errcode = '42501'; end if;
++  if c.status <> 'Approved' then raise exception 'Only approved content can be scheduled'; end if;
++  if c.ugc_id is not null and not public.ugc_permission_ok(c.ugc_id) then
++    raise exception 'The creator''s permission is missing, declined or expired';
++  end if;
++  insert into public.publishing_jobs (content_id, approval_id, brand_id, platform, run_at, state)
++  values (c.id, c.approval_id, c.brand_id, p_platform, c.scheduled_at, 'manual') returning id into v_job;
++  perform set_config('app.via_workflow', 'on', true);
++  update public.content_items set status = 'Scheduled', publish_status = 'Scheduled manually in Later' where id = c.id;
++  perform set_config('app.via_workflow', 'off', true);
++  return v_job;
++end $$;
++
++create or replace function public.mark_published_manual(p_content text, p_post_url text default null)
++returns void language plpgsql security definer set search_path = public as $$
++declare c public.content_items;
++begin
++  if (select paused from public.settings) then raise exception 'Publishing is paused'; end if;
++  select * into c from public.content_items where id = p_content for update;
++  if not public.can_publish(c.brand_id) then raise exception 'You do not have publishing permission' using errcode = '42501'; end if;
++  if c.status not in ('Approved', 'Scheduled') then raise exception 'Only approved content can be marked published'; end if;
++  if c.published_at is not null then raise exception 'Already marked published'; end if;
++  if c.ugc_id is not null and not public.ugc_permission_ok(c.ugc_id) then
++    raise exception 'The creator''s permission is missing, declined or expired';
++  end if;
++  perform set_config('app.via_workflow', 'on', true);
++  update public.content_items set status = 'Published', published_at = now(), external_post_url = p_post_url,
++         publish_status = 'Posted — confirmed manually' where id = c.id;
++  update public.publishing_jobs set state = 'confirmed', updated_at = now() where content_id = c.id and approval_id = c.approval_id;
++  if c.ugc_id is not null then update public.ugc_items set status = 'used' where id = c.ugc_id; end if;
++  perform set_config('app.via_workflow', 'off', true);
++end $$;
++
++-- ───────── Jobs: discovery and recommendations ─────────
++alter table public.jobs drop constraint jobs_type_check;
++alter table public.jobs add constraint jobs_type_check
++  check (type in ('shopify.sync', 'ai.plan', 'ai.generate', 'publish.instagram', 'ugc.discover', 'ugc.recommend'));
++
++create or replace function public.enqueue_job(p_type text, p_brand text, p_payload jsonb default '{}'::jsonb,
++  p_dedupe text default null, p_run_after timestamptz default now())
++returns bigint language plpgsql security definer set search_path = public as $$
++declare v_id bigint;
++begin
++  if not public.is_service() then
++    if p_type in ('shopify.sync', 'ugc.discover') and not public.has_role(p_brand, 'approver') then raise exception 'Only approvers can run discovery or syncs' using errcode = '42501'; end if;
++    if p_type in ('ai.plan', 'ai.generate', 'ugc.recommend') and not public.has_role(p_brand, 'contributor') then raise exception 'Contributors and above can run the AI' using errcode = '42501'; end if;
++    if p_type = 'publish.instagram' then raise exception 'Live publishing is not enabled' using errcode = '42501'; end if;
++  end if;
++  insert into public.jobs (type, brand_id, payload, dedupe_key, run_after) values (p_type, p_brand, p_payload, p_dedupe, p_run_after)
++  on conflict (dedupe_key) where dedupe_key is not null and status in ('queued', 'running') do nothing
++  returning id into v_id;
++  if v_id is null then select id into v_id from public.jobs where dedupe_key = p_dedupe and status in ('queued', 'running'); end if;
++  return v_id;
++end $$;
++
++-- ───────── Row level security ─────────
++alter table public.instagram_connections enable row level security;
++alter table public.ig_mention_events enable row level security;
++alter table public.ugc_items enable row level security;
++alter table public.ugc_permission_events enable row level security;
++
++create policy igconn_read on public.instagram_connections for select using (public.has_role(brand_id, 'viewer'));
++create policy ugc_read on public.ugc_items for select using (public.has_role(brand_id, 'viewer'));
++create policy ugc_ins on public.ugc_items for insert with check (public.has_role(brand_id, 'contributor'));
++create policy ugc_upd on public.ugc_items for update using (public.has_role(brand_id, 'contributor')) with check (public.has_role(brand_id, 'contributor'));
++create policy ugc_del on public.ugc_items for delete using (public.has_role(brand_id, 'approver'));
++create policy ugc_events_read on public.ugc_permission_events for select using (public.has_role(brand_id, 'viewer'));
++
++revoke insert, update, delete, truncate on public.instagram_connections, public.ig_mention_events, public.ugc_permission_events from anon, authenticated;
++
++do $$
++begin
++  if exists (select 1 from pg_publication where pubname = 'supabase_realtime') then
++    alter publication supabase_realtime add table public.ugc_items, public.instagram_connections;
++  end if;
++end $$;
+diff --git a/supabase/run-db-tests.sh b/supabase/run-db-tests.sh
+index 5bf25ec..9310516 100755
+--- a/supabase/run-db-tests.sh
++++ b/supabase/run-db-tests.sh
+@@ -7,4 +7,5 @@ cd "$(dirname "$0")"
+ psql "$PGURL/postgres" -qc "drop database if exists studio_dbtest with (force);" -c "create database studio_dbtest;"
+ for f in tests_local_stubs.sql migrations/*.sql seed.sql; do psql "$PGURL/studio_dbtest" -q -v ON_ERROR_STOP=1 -f "$f"; done
+ psql "$PGURL/studio_dbtest" -q -f tests_security.sql | grep -E "PASS|FAIL|passed"
++psql "$PGURL/studio_dbtest" -q -f tests_ugc.sql | grep -E "PASS|FAIL|passed"
+ psql "$PGURL/postgres" -qc "drop database studio_dbtest with (force);"
+diff --git a/supabase/tests_security.sql b/supabase/tests_security.sql
+index 0cf027d..4c63833 100644
+--- a/supabase/tests_security.sql
++++ b/supabase/tests_security.sql
+@@ -112,7 +112,11 @@ set timezone='Australia/Brisbane';
+ select public._ok('Fingerprint is identical in every time zone', (select f from _fp)=(select public.content_fingerprint(c) from public.content_items c where id='c1'));
+ select public._ok('Audit hash chain verifies', (select ok from public.verify_audit_chain()));
+ -- Simulate a database superuser bypassing the triggers to tamper: the chain must expose it.
+-alter table public.audit_log disable trigger audit_no_update; update public.audit_log set detail='tampered' where id=(select min(id) from public.audit_log); alter table public.audit_log enable trigger audit_no_update;
++create temp table _orig as select id, detail from public.audit_log where id=(select min(id) from public.audit_log);
++alter table public.audit_log disable trigger audit_no_update; update public.audit_log set detail='tampered' where id=(select id from _orig); alter table public.audit_log enable trigger audit_no_update;
+ select public._ok('Tampering by a superuser is detected by the hash chain', not (select ok from public.verify_audit_chain()));
++-- put the record back so later suites start from an intact chain
++alter table public.audit_log disable trigger audit_no_update; update public.audit_log a set detail=o.detail from _orig o where a.id=o.id; alter table public.audit_log enable trigger audit_no_update;
++select public._ok('Restoring the original record makes the chain verify again', (select ok from public.verify_audit_chain()));
+ select format('%s  %s%s', case when pass then 'PASS' else 'FAIL' end, label, case when pass then '' else '  →  '||coalesce(detail,'') end) from public._results order by n;
+ select format('%s/%s passed', count(*) filter (where pass), count(*)) from public._results;
+diff --git a/supabase/tests_ugc.sql b/supabase/tests_ugc.sql
+new file mode 100644
+index 0000000..8fd7cff
+--- /dev/null
++++ b/supabase/tests_ugc.sql
+@@ -0,0 +1,57 @@
++\set QUIET on
++\pset tuples_only on
++-- Uses the helpers and people created in tests_security.sql (run that first, same database).
++delete from public._results;
++reset role;
++insert into public.instagram_connections(brand_id, ig_user_id, username) values ('ttc','17841400000000001','thetilecollective');
++select set_config('request.jwt.claim.role','service_role',false); set role service_role;
++insert into public.ugc_items(id,brand_id,fingerprint,sources,external_id,permalink,creator_handle,caption,preview_url,posted_at,relevance_score)
++values ('u1','ttc','ig:ABC123',array['instagram_tag'],'901','https://www.instagram.com/p/ABC123/','@Jane.Builds','Our new ensuite with Bora Ice Polished','https://cdn.test/x.jpg','2026-10-20',80);
++select public._ok('Server discovery can add tagged posts', exists(select 1 from public.ugc_items where id='u1' and creator_handle='jane.builds'));
++select public._fails('The same post cannot be added twice for a brand', $q$insert into public.ugc_items(brand_id,fingerprint,sources) values ('ttc','ig:ABC123',array['instagram_mention'])$q$);
++insert into public.ugc_items(id,brand_id,fingerprint,sources) values ('u-cto','cto','ig:ABC123',array['instagram_tag']);
++select public._ok('The same post can exist separately for the other brand', exists(select 1 from public.ugc_items where id='u-cto'));
++reset role;
++
++set role authenticated;
++select public._as('00000000-0000-0000-0000-00000000000c'); -- TTC contributor
++select public._fails('Contributor cannot add API-sourced items', $q$insert into public.ugc_items(brand_id,fingerprint,sources) values ('ttc','ig:FAKE',array['instagram_tag'])$q$);
++insert into public.ugc_items(id,brand_id,fingerprint,sources,permalink,creator_handle) values ('u2','ttc','ig:LATER1',array['later_import'],'https://www.instagram.com/p/LATER1/','studio.co');
++select public._ok('Contributor can import a post from Later by hand', exists(select 1 from public.ugc_items where id='u2'));
++select public._fails('Contributor cannot pre-set permission on import', $q$insert into public.ugc_items(brand_id,fingerprint,sources,permission_status) values ('ttc','ig:X2',array['manual'],'Permission granted')$q$);
++select public._fails('Contributor cannot change AI suggestions or scores', $q$update public.ugc_items set relevance_score=100 where id='u1'$q$);
++update public.ugc_items set permission_status='Permission requested', permission_requested_via='Instagram DM' where id='u1';
++select public._ok('Contributor can record that permission was requested', (select permission_status::text from public.ugc_items where id='u1')='Permission requested');
++select public._fails('Contributor cannot record permission as granted', $q$update public.ugc_items set permission_status='Permission granted', permission_evidence='DM reply yes', usage_scope=array['organic_social'], attribution='📷 @jane.builds' where id='u1'$q$);
++select public._fails('Other brand staff cannot see TTC UGC', $q$do $d$ begin perform public._as('00000000-0000-0000-0000-00000000000b'); if exists (select 1 from public.ugc_items where id='u1') then raise exception 'visible'; end if; raise exception 'hidden'; end $d$$q$);
++
++-- A draft that uses the UGC cannot be approved or scheduled until permission is granted
++select public._as('00000000-0000-0000-0000-00000000000a'); -- Georgia (admin)
++insert into public.content_items(id,brand_id,title,caption,scheduled_at,status,ugc_id) values ('cu1','ttc','Customer Projects: Jane''s ensuite','A calm ensuite. 📷 @jane.builds','2026-12-02 18:00+10','Needs Review','u1');
++select public._fails('Cannot link UGC from the other brand', $q$insert into public.content_items(id,brand_id,title,ugc_id) values ('cu2','ttc','x','u-cto')$q$);
++select public._fails('Approval refused without the creator''s permission', $q$select public.approve_content('cu1')$q$);
++select public._fails('Granting permission requires evidence', $q$update public.ugc_items set permission_status='Permission granted', usage_scope=array['organic_social'], attribution='📷 @jane.builds' where id='u1'$q$);
++select public._fails('Granting permission requires a usage scope', $q$update public.ugc_items set permission_status='Permission granted', permission_evidence='DM reply: yes happy for you to share', attribution='📷 @jane.builds' where id='u1'$q$);
++update public.ugc_items set permission_status='Permission granted', permission_evidence='DM reply 4 Nov: "Yes, happy for you to share with credit"', usage_scope=array['organic_social','stories'], attribution='📷 @jane.builds', usage_expires_on='2027-12-31' where id='u1';
++select public._ok('Approver records permission with evidence, scope and credit', public.ugc_permission_ok('u1'));
++select public._ok('Every permission change is kept', (select count(*) from public.ugc_permission_events where ugc_id='u1')=2);
++select public.approve_content('cu1');
++select public._ok('Approval allowed once permission is granted', (select status from public.content_items where id='cu1')='Approved');
++update public.ugc_items set permission_status='Permission declined' where id='u1';
++select public._fails('Scheduling refused after the creator withdraws permission', $q$select public.mark_scheduled_manual('cu1')$q$);
++select public._ok('Declining clears the usage scope', (select usage_scope from public.ugc_items where id='u1')='{}');
++select public._fails('Permission history cannot be edited', $q$update public.ugc_permission_events set status='Permission granted'$q$);
++select public._fails('Permission history cannot be deleted', $q$delete from public.ugc_permission_events$q$);
++reset role;
++select public._fails('Saving media is blocked without permission (even for server code)', $q$do $d$ begin perform set_config('request.jwt.claim.role','service_role',true); insert into public.assets(id,brand_id,storage_path,file_name,ugc_id) values ('ax','ttc','ttc/ugc-x.jpg','x.jpg','u1'); end $d$$q$);
++update public.ugc_items set permission_status='Permission granted', permission_evidence='Re-confirmed by email 6 Nov', usage_scope=array['organic_social'], attribution='📷 @jane.builds' where id='u1';
++insert into public.assets(id,brand_id,storage_path,file_name,ugc_id) values ('ax','ttc','ttc/ugc-x.jpg','x.jpg','u1');
++select public._ok('Media can be saved once permission is granted', exists(select 1 from public.assets where id='ax' and ugc_id='u1' and not approved));
++select public._ok('UGC jobs: contributors can queue recommendations', true);
++set role authenticated; select public._as('00000000-0000-0000-0000-00000000000c');
++select public._ok('Contributor can queue AI recommendations', public.enqueue_job('ugc.recommend','ttc') is not null);
++select public._fails('Contributor cannot run discovery', $q$select public.enqueue_job('ugc.discover','ttc')$q$);
++reset role;
++select public._ok('Audit chain still verifies', (select ok from public.verify_audit_chain()));
++select format('%s  %s%s', case when pass then 'PASS' else 'FAIL' end, label, case when pass then '' else '  →  '||coalesce(detail,'') end) from public._results order by n;
++select format('%s/%s UGC tests passed', count(*) filter (where pass), count(*)) from public._results;
+diff --git a/tests/integration.test.ts b/tests/integration.test.ts
+index 158d647..9a0d1e1 100644
+--- a/tests/integration.test.ts
++++ b/tests/integration.test.ts
+@@ -205,3 +205,97 @@ test("artifact import moves real posts, leaves demo data behind, and is safe to
+   assert.equal(again.auditImported, 0, "re-run adds no duplicate activity");
+   assert.ok((await db(`select ok from public.verify_audit_chain()`)).ok);
+ });
++
++// ───────── UGC Discovery ─────────
++test("UGC: discovery merges tags and mentions, spots duplicates, refreshes previews, and keeps brands apart", async () => {
++  const { discoverBrand } = await import("@/lib/ugc/discover");
++  const tile = (await db(`select title from public.products where brand_id='ttc' and active and kind='tile' order by id limit 1`)).title as string;
++  const media = (id: string, code: string, user: string, caption: string, o: Record<string, unknown> = {}) => ({ id, caption, media_type: "IMAGE",
++    media_url: `https://scontent.cdninstagram.com/${id}.jpg`, permalink: `https://www.instagram.com/p/${code}/`, timestamp: "2026-11-01T02:00:00+0000", username: user, ...o });
++  let previewVersion = 1;
++  const graph = (async (path: string, params: Record<string, string>) => {
++    if (path === "1784" && params.fields === "id,username") return { id: "1784", username: "thetilecollective" };
++    if (path === "1784/tags") return { data: [
++      media("m1", "AAA111", "Jane.Builds", `Our ensuite reno is finished! ${tile} looks amazing #reno`, { media_url: `https://scontent.cdninstagram.com/m1-v${previewVersion}.jpg` }),
++      media("m2", "AAA999", "jane.builds", `Our ensuite reno is finished! ${tile} looks amazing #bathroom`),
++      media("m3", "VID123", "smith.designs", "New kitchen splashback reveal", { media_type: "VIDEO", media_url: undefined, thumbnail_url: "https://scontent.cdninstagram.com/v.jpg" })] };
++    if (params.fields?.startsWith("mentioned_media.media_id(m4)")) return { mentioned_media: media("m4", "AAA111", "jane.builds", `Our ensuite reno is finished! ${tile} looks amazing`) };
++    throw new Error(`unexpected ${path} ${JSON.stringify(params)}`);
++  }) as never;
++  await sqlAsOwner(`insert into public.ig_mention_events(brand_id, media_id) values ('ttc','m4')`);
++  const r1 = await discoverBrand("ttc", { db: service, graph, igUserId: "1784" });
++  assert.deepEqual(r1, { added: 2, refreshed: 1, duplicates: 1, mentionsProcessed: 1 }); // m4 is the same post as m1
++  const rows = await sqlAsOwner(`select fingerprint, sources, creator_handle, status, duplicate_of, relevance_score, product_matches, preview_url from public.ugc_items where brand_id='ttc' order by fingerprint`);
++  const a = rows.find((r) => r.fingerprint === "ig:AAA111")!;
++  assert.deepEqual(a.sources.sort(), ["instagram_mention", "instagram_tag"]);
++  assert.equal(a.creator_handle, "jane.builds"); assert.ok(a.relevance_score >= 60); assert.ok(a.product_matches.length >= 1);
++  assert.ok(rows.find((r) => r.fingerprint === "ig:AAA999")!.duplicate_of, "re-shared copy marked as duplicate");
++  assert.equal(rows.find((r) => r.fingerprint === "ig:VID123")!.preview_url, "https://scontent.cdninstagram.com/v.jpg", "video uses its thumbnail");
++  previewVersion = 2;
++  const r2 = await discoverBrand("ttc", { db: service, graph, igUserId: "1784" });
++  assert.equal(r2.added, 0); assert.equal(r2.mentionsProcessed, 0);
++  assert.match((await db(`select preview_url from public.ugc_items where fingerprint='ig:AAA111'`)).preview_url, /m1-v2/, "expired preview links refreshed");
++  const cto = pgSupabase({ uid: "00000000-0000-0000-0000-0000000000ff", service: false }) as unknown as SupabaseClient;
++  assert.equal(((await cto.from("ugc_items").select("id")).data ?? []).length, 0, "someone without TTC access sees no TTC UGC");
++});
++
++test("UGC: Later import, AI recommendation, add to calendar, and permission gating end to end", async () => {
++  const { parseLaterImport } = await import("@/lib/ugc/normalize");
++  const { recommendUgc } = await import("@/lib/ugc/recommender");
++  const { ugcStore } = await import("@/lib/ugc/store");
++  const { draftFromUgc } = await import("@/lib/ugc/draft");
++  const contributor = pgSupabase({ uid: C, service: false }) as unknown as SupabaseClient;
++  const { rows } = parseLaterImport("https://www.instagram.com/p/AAA111/ @jane.builds\nhttps://www.instagram.com/p/LATER77/ @studio.interiors");
++  const ins = await contributor.from("ugc_items").upsert(rows.map((r) => ({ brand_id: "ttc", fingerprint: r.fingerprint, sources: ["later_import"], permalink: r.permalink, creator_handle: r.creator_handle })),
++    { onConflict: "brand_id,fingerprint", ignoreDuplicates: true }).select("id");
++  assert.equal(ins.error, null); assert.equal(ins.data!.length, 1, "post already found via Instagram is not imported twice");
++
++  const target = (await db(`select id from public.ugc_items where fingerprint='ig:AAA111'`)).id as string;
++  const tileId = (await db(`select product_matches[1] p from public.ugc_items where id=$1`, [target])).p as string;
++  const fake = { async create() { return { content: [{ type: "tool_use", name: "record_recommendation", input: { fit: true, opportunity: "Customer Projects", strength: 5,
++    why: "A finished ensuite that shows the tile beautifully.", caption: "A calm, finished ensuite from our community.", productIds: [tileId], suggestedDate: "2027-02-12" } }] }; } };
++  const store = await ugcStore(service, "ttc");
++  const recs = await recommendUgc({ store, model: fake, modelName: "m", now: new Date("2027-02-01T00:00:00Z"), ids: [target] });
++  assert.equal(recs[0].suggestion.fit, true);
++  assert.equal((await db(`select status from public.ugc_items where id=$1`, [target])).status, "recommended");
++  assert.equal((await (await ugcStore(service, "ttc")).candidates({ limit: 10 })).some((c) => c.id === target), false, "not re-recommended within four weeks");
++
++  const draft = await draftFromUgc(contributor, target);
++  assert.ok(draft.contentId, JSON.stringify(draft));
++  const row = await db(`select status, ugc_id, caption, product_ids from public.content_items where id=$1`, [draft.contentId]);
++  assert.equal(row.status, "Needs Review"); assert.equal(row.ugc_id, target);
++  assert.match(row.caption, /📷 @jane\.builds$/); assert.deepEqual(row.product_ids, [tileId]);
++  assert.equal((await draftFromUgc(contributor, target)).already, true, "adding twice doesn't duplicate the draft");
++
++  // Through the real dashboard: quality check flags missing permission, approval is refused, then allowed once granted.
++  const g = await openStudio(G, { ttc: "admin", cto: "admin" });
++  g.w.location.hash = "ugc"; await sleep(150);
++  assert.ok(g.w.document.querySelector('.nav[data-p="ugc"]'), "UGC Discovery is in the sidebar");
++  assert.match(g.w.document.querySelector("#view")!.textContent!, /@jane\.builds/);
++  assert.ok(g.S(`qc(S.items.find(i=>i.id==="${draft.contentId}")).some(x=>x.l==="error"&&/permission/.test(x.m))`), "studio flags the missing permission");
++  const refused = await g.S(`SB.rpc("approve_content",{p_content:"${draft.contentId}"})`);
++  assert.match(refused.error.message, /without current permission/);
++  const saveBtn = g.w.document.querySelector(`[data-a="ugcSave"][data-id="${target}"]`) as HTMLButtonElement;
++  assert.ok(saveBtn.disabled, "Save to Content Library is disabled until permission is granted");
++  await g.click(`[data-a="ugcPerm"][data-id="${target}"]`);
++  (g.w.document.querySelector("#pm-status") as HTMLSelectElement).value = "Permission granted";
++  (g.w.document.querySelector("#pm-evidence") as HTMLTextAreaElement).value = "Instagram DM reply 11 Nov 2026: \"Yes, happy for you to share with credit\"";
++  (g.w.document.querySelector('.pm-scope[value="organic_social"]') as HTMLInputElement).checked = true;
++  await g.click('#modal [data-m="1"]'); await sleep(400);
++  const perm = await db(`select permission_status, usage_scope, attribution, permission_recorded_by from public.ugc_items where id=$1`, [target]);
++  assert.deepEqual([perm.permission_status, perm.usage_scope, perm.attribution, perm.permission_recorded_by], ["Permission granted", ["organic_social"], "📷 @jane.builds", G]);
++  assert.equal((await db(`select count(*)::int n from public.ugc_permission_events where ugc_id=$1`, [target])).n, 1);
++  await g.S(`LOADERS.ugc_items().then(render)`); await sleep(200);
++  assert.ok(!g.S(`qc(S.items.find(i=>i.id==="${draft.contentId}")).some(x=>/permission/.test(x.m))`), "permission warning cleared");
++  await g.S(`approve("${draft.contentId}")`); await sleep(400);
++  assert.equal((await db(`select status from public.content_items where id=$1`, [draft.contentId])).status, "Approved");
++
++  // A Contributor can mark permission requested but not record the creator's decision.
++  const c = await openStudio(C, { ttc: "contributor" });
++  const other = (await db(`select id from public.ugc_items where fingerprint='ig:VID123'`)).id as string;
++  const asked = await c.S(`SB.from("ugc_items").update({permission_status:"Permission requested",permission_requested_via:"Instagram DM"}).eq("id","${other}")`);
++  assert.equal(asked.error, null);
++  const grant = await c.S(`SB.from("ugc_items").update({permission_status:"Permission granted",permission_evidence:"they said yes",usage_scope:["organic_social"],attribution:"x"}).eq("id","${other}")`);
++  assert.match(grant.error.message, /Only approvers/);
++  assert.deepEqual([...g.errors, ...c.errors], []);
++});
+diff --git a/tests/support/pg-supabase.ts b/tests/support/pg-supabase.ts
+index fb96a3b..82e24ad 100644
+--- a/tests/support/pg-supabase.ts
++++ b/tests/support/pg-supabase.ts
+@@ -52,7 +52,7 @@ class Query implements PromiseLike<{ data: unknown; error: unknown; count?: numb
+   private op: "select" | "insert" | "upsert" | "update" | "delete" = "select";
+   private cols = "*"; private filters: [string, string, unknown][] = []; private orders: string[] = [];
+   private lim?: number; private off?: number; private one: "" | "single" | "maybe" = ""; private returning = false;
+-  private rows: Record<string, unknown>[] = []; private patch: Record<string, unknown> = {}; private conflict = "";
++  private rows: Record<string, unknown>[] = []; private patch: Record<string, unknown> = {}; private conflict = ""; private ignoreDup = false;
+   private countOnly = false;
+   constructor(private who: Who, private table: string) {}
+   select(cols = "*", opts?: { count?: string; head?: boolean }) {
+@@ -60,7 +60,7 @@ class Query implements PromiseLike<{ data: unknown; error: unknown; count?: numb
+     return this;
+   }
+   insert(r: Record<string, unknown> | Record<string, unknown>[]) { this.op = "insert"; this.rows = Array.isArray(r) ? r : [r]; return this; }
+-  upsert(r: Record<string, unknown> | Record<string, unknown>[], o?: { onConflict?: string }) { this.op = "upsert"; this.rows = Array.isArray(r) ? r : [r]; this.conflict = o?.onConflict ?? ""; return this; }
++  upsert(r: Record<string, unknown> | Record<string, unknown>[], o?: { onConflict?: string; ignoreDuplicates?: boolean }) { this.op = "upsert"; this.rows = Array.isArray(r) ? r : [r]; this.conflict = o?.onConflict ?? ""; this.ignoreDup = !!o?.ignoreDuplicates; return this; }
+   update(p: Record<string, unknown>) { this.op = "update"; this.patch = p; return this; }
+   delete() { this.op = "delete"; return this; }
+   eq(c: string, v: unknown) { this.filters.push([c, "=", v]); return this; }
+@@ -68,6 +68,7 @@ class Query implements PromiseLike<{ data: unknown; error: unknown; count?: numb
+   gte(c: string, v: unknown) { this.filters.push([c, ">=", v]); return this; }
+   lte(c: string, v: unknown) { this.filters.push([c, "<=", v]); return this; }
+   in(c: string, v: unknown[]) { this.filters.push([c, "in", v]); return this; }
++  is(c: string, v: null | boolean) { this.filters.push([c, "is", v]); return this; }
+   order(c: string, o?: { ascending?: boolean }) { this.orders.push(`${ident(c)} ${o?.ascending === false ? "desc" : "asc"}`); return this; }
+   limit(n: number) { this.lim = n; return this; }
+   range(a: number, b: number) { this.off = a; this.lim = b - a + 1; return this; }
+@@ -86,6 +87,7 @@ class Query implements PromiseLike<{ data: unknown; error: unknown; count?: numb
+     if (!this.filters.length) return "";
+     return " where " + this.filters.map(([c, op, v]) => {
+       if (op === "in") { params.push(v); return `${ident(c)} = any($${params.length})`; }
++      if (op === "is") return `${ident(c)} is ${v === null ? "null" : v ? "true" : "false"}`;
+       params.push(v); return `${ident(c)} ${op} $${params.length}`;
+     }).join(" and ");
+   }
+@@ -102,7 +104,8 @@ class Query implements PromiseLike<{ data: unknown; error: unknown; count?: numb
+         const keys = [...new Set(this.rows.flatMap((r) => Object.keys(r)))];
+         const values = this.rows.map((r) => "(" + keys.map((k) => (k in r ? this.val(k, r[k], params) : "default")).join(", ") + ")").join(", ");
+         sql = `insert into public.${ident(this.table)} (${keys.map(ident).join(", ")}) values ${values}`;
+-        if (this.op === "upsert") sql += ` on conflict (${(this.conflict || pkeys[this.table]!).split(",").map((c) => ident(c.trim())).join(", ")}) do update set ${keys.map((k) => `${ident(k)} = excluded.${ident(k)}`).join(", ")}`;
++        const target = (this.conflict || pkeys[this.table]!).split(",").map((c) => ident(c.trim())).join(", ");
++        if (this.op === "upsert") sql += this.ignoreDup ? ` on conflict (${target}) do nothing` : ` on conflict (${target}) do update set ${keys.map((k) => `${ident(k)} = excluded.${ident(k)}`).join(", ")}`;
+         sql += " returning *";
+       } else if (this.op === "update") {
+         const sets = Object.entries(this.patch).map(([k, v]) => `${ident(k)} = ${this.val(k, v, params)}`).join(", ");
+diff --git a/tests/ugc.test.ts b/tests/ugc.test.ts
+new file mode 100644
+index 0000000..1f52707
+--- /dev/null
++++ b/tests/ugc.test.ts
+@@ -0,0 +1,104 @@
++import { test } from "node:test";
++import assert from "node:assert/strict";
++import { shortcodeFromUrl, fingerprintFor, captionHash, parseLaterImport, canonicalPermalink } from "@/lib/ugc/normalize";
++import { scoreUgc, matchProducts } from "@/lib/ugc/score";
++import { chooseDate, recommendUgc, type RecommenderStore, type UgcCandidate, type UgcSuggestion } from "@/lib/ugc/recommender";
++import type { PlannerProduct } from "@/lib/ai/planner";
++
++test("one fingerprint per post across every link form and source", () => {
++  for (const u of ["https://www.instagram.com/p/C9xYz_12AB/", "https://instagram.com/reel/C9xYz_12AB/?igsh=abc", "https://m.instagram.com/jane.builds/p/C9xYz_12AB"])
++    assert.equal(fingerprintFor({ permalink: u }), "ig:C9xYz_12AB", u);
++  assert.equal(fingerprintFor({ externalId: "1789" }), "id:1789");
++  assert.equal(shortcodeFromUrl("https://example.com/p/ABCDE"), null);
++  assert.equal(canonicalPermalink("https://instagram.com/reel/C9xYz_12AB/?x=1"), "https://www.instagram.com/p/C9xYz_12AB/");
++});
++test("re-shared captions from the same creator are spotted as duplicates", () => {
++  const a = captionHash("@Jane.Builds", "Our ensuite is finally finished! Bora Ice tiles #reno @thetilecollective");
++  const b = captionHash("jane.builds", "our ensuite is finally finished!!  bora ice tiles #bathroom");
++  assert.ok(a && a === b);
++  assert.notEqual(a, captionHash("other.person", "Our ensuite is finally finished! Bora Ice tiles"));
++  assert.equal(captionHash("x", "Love it"), null); // too short to judge
++});
++test("Later import accepts pasted links with handles, and CSV exports", () => {
++  const links = parseLaterImport("https://www.instagram.com/p/AAA111/ @studio.co\nnot a link\nhttps://www.instagram.com/p/AAA111/\nhttps://instagram.com/reel/BBB222/");
++  assert.equal(links.rows.length, 2); assert.equal(links.rows[0].creator_handle, "studio.co"); assert.equal(links.errors.length, 1);
++  const csv = parseLaterImport(`URL,Username,Caption,Date\nhttps://www.instagram.com/p/CCC333/,@Jane.Builds,"Our new ensuite, finally!",14/10/2026`);
++  assert.deepEqual([csv.rows[0].creator_handle, csv.rows[0].caption, csv.rows[0].posted_at?.slice(0, 10)], ["jane.builds", "Our new ensuite, finally!", "2026-10-14"]);
++});
++const cat = [{ id: "shop-ttc-1", title: "Bora Ice Polished", tags: [], kind: "tile", inventory: 10 }, { id: "shop-ttc-2", title: "Travertine Stone Ivory In Out", tags: [], kind: "tile", inventory: 10 },
++  { id: "shop-ttc-9", title: "Grate Floor Drain Chrome", tags: [], kind: "accessory", inventory: 3 }];
++test("relevance score rewards on-brand, recent, product-specific posts and explains why", () => {
++  const strong = scoreUgc({ caption: "Before and after of our ensuite reno with Bora Ice Polished tiles", creator_handle: "smithbuilders", media_type: "CAROUSEL_ALBUM",
++    preview_url: "https://x", posted_at: new Date().toISOString(), sources: ["instagram_tag"] }, cat);
++  const weak = scoreUgc({ caption: "", creator_handle: "random", media_type: "VIDEO", preview_url: null, posted_at: "2024-01-01", sources: ["later_import"] }, cat);
++  assert.ok(strong.score >= 85 && weak.score <= 10, `${strong.score} vs ${weak.score}`);
++  assert.deepEqual(strong.productMatches, ["shop-ttc-1"]);
++  assert.ok(strong.hints.includes("Before and After") && strong.hints.includes("Builder and Designer Features"));
++  assert.ok(strong.reasons.length >= 5);
++  assert.deepEqual(matchProducts("love the drain", cat), [], "accessories are never suggested");
++  assert.deepEqual(matchProducts("Travertine Stone around the pool", cat), ["shop-ttc-2"], "range-name match");
++});
++test("dates: keep a free valid suggestion, otherwise next free slot; Monday Inspiration lands on a Monday", () => {
++  const now = new Date("2026-11-10T00:00:00Z"); // Tue 10 Nov Brisbane
++  assert.equal(chooseDate("2026-11-20", "Customer Projects", now, new Set()), "2026-11-20");
++  assert.equal(chooseDate("2026-11-20", "Customer Projects", now, new Set(["2026-11-20"])), "2026-11-13");
++  assert.equal(chooseDate("2026-11-18", "Monday Inspiration", now, new Set(["2026-11-16"])), "2026-11-23");
++  assert.equal(chooseDate("2025-01-01", "Save This Space", now, new Set()), "2026-11-13");
++});
++
++const P = (id: string, title: string): PlannerProduct => ({ id, title, size: "600 × 600 mm", finish: "Polished", colour: "White", specs: {}, tags: [], description: "",
++  kind: "tile", inventory: 5, url: "", vendor: "", lastFeatured: null, approvedAssetId: null });
++function memStore(cands: UgcCandidate[]) {
++  const saved = new Map<string, UgcSuggestion>();
++  const store: RecommenderStore = {
++    brand: { id: "ttc", name: "The Tile Collective", short_name: "TTC", guidelines: { avoid: "cheap, bargain" } },
++    candidates: async ({ limit }) => cands.slice(0, limit), productsFor: async () => [P("shop-ttc-1", "Bora Ice Polished")],
++    catalogueTitles: async () => [{ id: "shop-ttc-1", title: "Bora Ice Polished" }, { id: "shop-ttc-2", title: "Travertine Stone Ivory In Out" }],
++    takenDates: async () => ["2026-11-13"], save: async (id, s) => { saved.set(id, s); },
++  };
++  return { store, saved };
++}
++const cand = (o: Partial<UgcCandidate> = {}): UgcCandidate => ({ id: "u1", creator_handle: "jane.builds", caption: "Our ensuite with Bora Ice", media_type: "IMAGE",
++  preview_url: "https://scontent.cdninstagram.com/x.jpg", posted_at: "2026-11-01T00:00:00Z", permalink: "https://www.instagram.com/p/AAA/", relevance_score: 80,
++  relevance_reasons: [], product_matches: ["shop-ttc-1"], permission_status: "Permission not requested", attribution: "", sources: ["instagram_tag"], ...o });
++const model = (inputs: Record<string, unknown>[], seen: unknown[] = []) => { let i = 0; return { seen, async create(p: Record<string, unknown>) { seen.push(p); return { content: [{ type: "tool_use", name: "record_recommendation", input: inputs[i++] }] }; } }; };
++
++test("recommender: original caption, verified products only, credit line added, free date chosen", async () => {
++  const { store, saved } = memStore([cand()]);
++  const seen: unknown[] = [];
++  await recommendUgc({ store, modelName: "m", now: new Date("2026-11-10T00:00:00Z"), model: model([{ fit: true, opportunity: "Customer Projects", strength: 4, why: "Beautiful finished ensuite.",
++    caption: "Soft light, polished stone. A calm ensuite in Bora Ice Polished.", productIds: ["shop-ttc-1", "shop-ttc-77"], suggestedDate: "2026-11-13" }], seen) });
++  const s = saved.get("u1")!;
++  assert.equal(s.fit, true); assert.deepEqual(s.productIds, ["shop-ttc-1"]);
++  assert.ok(s.problems.some((p) => p.includes("not in the verified catalogue")));
++  assert.equal(s.credit, "📷 @jane.builds"); assert.equal(s.series, "Customer Projects");
++  assert.notEqual(s.suggestedDate, "2026-11-13", "taken date avoided");
++  const req = seen[0] as { messages: { content: { type: string }[] }[]; tool_choice: { name: string } };
++  assert.equal(req.messages[0].content[0].type, "image", "the agent looks at the preview image");
++  assert.equal(req.tool_choice.name, "record_recommendation");
++});
++test("recommender holds back captions that invent facts, and records poor fits without recommending", async () => {
++  const { store, saved } = memStore([cand(), cand({ id: "u2" })]);
++  await recommendUgc({ store, modelName: "m", model: model([
++    { fit: true, opportunity: "Product Features", caption: "Bora Ice Polished, now only $19 and in stock!", productIds: ["shop-ttc-1"] },
++    { fit: false, why: "Shows a competitor's tiles." }]) });
++  assert.equal(saved.get("u1")!.caption, undefined);
++  assert.ok(saved.get("u1")!.problems.some((p) => p.includes("price")));
++  assert.equal(saved.get("u2")!.fit, false);
++});
++test("recommender uses the recorded credit line once permission is granted", async () => {
++  const { store, saved } = memStore([cand({ permission_status: "Permission granted", attribution: "Photo: @jane.builds (Jane Smith Builds)" })]);
++  await recommendUgc({ store, modelName: "m", model: model([{ fit: true, opportunity: "Instagram Stories", caption: "Inside Jane's new ensuite.", productIds: [] }]) });
++  assert.equal(saved.get("u1")!.credit, "Photo: @jane.builds (Jane Smith Builds)");
++  assert.equal(saved.get("u1")!.format, "Story");
++});
++test("if the preview link has expired, the agent retries from the caption alone", async () => {
++  const { store, saved } = memStore([cand()]);
++  let calls = 0;
++  await recommendUgc({ store, modelName: "m", model: { async create(p: Record<string, unknown>) {
++    calls++; const first = (p.messages as { content: { type: string }[] }[])[0].content[0].type;
++    if (first === "image") throw new Error("Could not fetch image");
++    return { content: [{ type: "tool_use", name: "record_recommendation", input: { fit: true, opportunity: "Save This Space", caption: "A calm space.", productIds: [] } }] };
++  } } });
++  assert.equal(calls, 2); assert.equal(saved.get("u1")!.fit, true);
++});
+diff --git a/vercel.json b/vercel.json
+index eed8e11..277dbb0 100644
+--- a/vercel.json
++++ b/vercel.json
+@@ -1,7 +1,20 @@
+ {
+   "crons": [
+-    { "path": "/api/cron/daily", "schedule": "0 19 * * *" },
+-    { "path": "/api/cron/plans", "schedule": "0 23 * * *" },
+-    { "path": "/api/jobs/run", "schedule": "30 19 * * *" }
++    {
++      "path": "/api/cron/daily",
++      "schedule": "0 19 * * *"
++    },
++    {
++      "path": "/api/cron/plans",
++      "schedule": "0 23 * * *"
++    },
++    {
++      "path": "/api/jobs/run",
++      "schedule": "30 19 * * *"
++    },
++    {
++      "path": "/api/cron/ugc",
++      "schedule": "0 21 * * 0"
++    }
+   ]
+-}
++}
+\ No newline at end of file
+-- 
+2.43.0
+

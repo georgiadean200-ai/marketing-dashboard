@@ -41,6 +41,9 @@ export function envStatus(): Record<string, boolean> {
     cronSecret: has("CRON_SECRET"),
     shopifyTtc: has("SHOPIFY_TTC_SHOP") && has("SHOPIFY_TTC_CLIENT_ID") && has("SHOPIFY_TTC_CLIENT_SECRET"),
     shopifyCto: has("SHOPIFY_CTO_SHOP") && has("SHOPIFY_CTO_CLIENT_ID") && has("SHOPIFY_CTO_CLIENT_SECRET"),
+    instagramTtc: has("META_TTC_IG_USER_ID") && has("META_TTC_ACCESS_TOKEN"),
+    instagramCto: has("META_CTO_IG_USER_ID") && has("META_CTO_ACCESS_TOKEN"),
+    instagramWebhook: has("META_APP_SECRET") && has("META_WEBHOOK_VERIFY_TOKEN"),
   };
 }
 

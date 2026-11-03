@@ -1,5 +1,6 @@
 export const SERIES = ["Inspiration", "Tile of the Week", "Product Feature", "Save This Space", "Perfect Match", "Tile School with Wade",
-  "Behind the Scenes", "Team Content", "Customer Projects", "Product Launches", "Campaigns", "Seasonal Inspiration"] as const;
+  "Behind the Scenes", "Team Content", "Customer Projects", "Product Launches", "Campaigns", "Seasonal Inspiration",
+  "Builder and Designer Features", "Before and After"] as const;
 export const FORMATS: Record<string, string[]> = {
   Instagram: ["Single image", "Carousel", "Reel", "Story"], Facebook: ["Single image", "Carousel", "Reel", "Story"],
   Pinterest: ["Pin"], LinkedIn: ["Single image", "Carousel", "Text post"], TikTok: ["Reel"], Email: ["Email"],
